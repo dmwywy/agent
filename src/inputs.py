@@ -1,7 +1,6 @@
 # 输入文本格式模块
 # src/inputs.py
 """把 A 的解析结果包装成模型输入。本文件只做"包装"，不做任何数值计算。"""
-from typing import Any
 
 MAX_CHARS = 4000          # 单段文本上限
 MAX_ITEMS = 40            # 一次最多让模型处理的科目/条款条数

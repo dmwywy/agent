@@ -1,0 +1,65 @@
+# rules/rules.yaml
+# 维度与权重以《CSI说明》为准（表内 / 表间 / 跨期间 / 主表与附注 / 研报引用）
+version: "1.0"
+
+dimensions:
+  C内: {name: 表内一致性,       weight: 0.25}
+  C间: {name: 表间一致性,       weight: 0.30}
+  C期: {name: 跨期间一致性,     weight: 0.15}
+  C附: {name: 主表与附注一致性, weight: 0.20}
+  C研: {name: 研报引用一致性,   weight: 0.10}
+
+rules:
+  - rule_id: BS01
+    dimension: C内
+    expr: "TOTAL_ASSETS - (TOTAL_LIAB + TOTAL_EQUITY)"
+    requires: [TOTAL_ASSETS, TOTAL_LIAB, TOTAL_EQUITY]
+    scope: CONSOLIDATED
+    tolerance: MAIN_TABLE
+    severity: HIGH
+    source: "年报-第十节-合并资产负债表"
+
+  - rule_id: BS02
+    dimension: C内
+    expr: "TOTAL_EQUITY - (EQUITY_PARENT + EQUITY_MINORITY)"
+    requires: [TOTAL_EQUITY, EQUITY_PARENT, EQUITY_MINORITY]
+    scope: CONSOLIDATED
+    tolerance: MAIN_TABLE
+    severity: HIGH
+    source: "年报-第十节-合并资产负债表"
+
+  - rule_id: IS03
+    dimension: C内
+    expr: "NET_PROFIT - (TOTAL_PROFIT - INCOME_TAX)"
+    requires: [NET_PROFIT, TOTAL_PROFIT, INCOME_TAX]
+    scope: CONSOLIDATED
+    tolerance: MAIN_TABLE
+    severity: HIGH
+    source: "年报-第十节-合并利润表"
+
+  - rule_id: CF01
+    dimension: C内
+    expr: "CF_NET_INCREASE - (CF_OPERATING)"      # 完整式应含投资与筹资净额，字段补齐后改为三项和
+    requires: [CF_NET_INCREASE, CF_OPERATING]
+    scope: CONSOLIDATED
+    tolerance: MAIN_TABLE
+    severity: MED
+    source: "年报-第十节-合并现金流量表"
+
+  - rule_id: NB01
+    dimension: C附
+    expr: "CASH_END - (CASH_ON_HAND + CASH_IN_BANK + CASH_OTHER)"
+    requires: [CASH_END, CASH_ON_HAND, CASH_IN_BANK, CASH_OTHER]
+    scope: CONSOLIDATED
+    tolerance: NOTE_DETAIL
+    severity: MED
+    source: "年报-第十节-合并资产负债表 + 附注七、1 货币资金"
+
+# 每条规则可附加的三个可选字段（CSV/Excel 版规则表的补充）：
+#   applicable_if:      适用条件（不满足则记 NA，不计入分母）
+#   on_not_applicable:  NA
+#   exempt_reason_required: true
+# 示例（规则 14 现金流净增加额 vs 货币资金变动）：
+#   applicable_if: "不存在财务公司或结算中心，且附注未披露受限资金调整"
+#   on_not_applicable: NA
+#   exempt_reason_required: true

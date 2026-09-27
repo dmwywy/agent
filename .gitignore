@@ -1,28 +1,28 @@
-# 凭据：绝不提交
+# credentials - never commit
 .env
 .env.*
 !.env.example
 
-# 运行产物：只保留基准缓存
+# run artifacts - keep baseline cache only
 runs/*
 !runs/demo_baseline/
 !runs/demo_baseline/**
 
-# 备份与临时文件
+# backups and temp
 runs_backup/
 *.bak
 
-# 环境与缓存
+# environment and caches
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 
-# 编辑器
+# editor - allow settings.json only
 .vscode/*
 !.vscode/settings.json
 
-# 大文件（走共享盘）
+# large files - use shared drive
 data/full/
 *.zip
 *.mp4

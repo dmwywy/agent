@@ -51,3 +51,6 @@ m["status"] = "OK" if data is not None else "PARTIAL"
 
 save_manifest(run_id, m)
 print("manifest 已写入：runs/%s/manifest.json" % run_id)
+
+data, status = call(PROMPT, payload, run_id=run_id,
+                    user_id="member_e", task="match_item")
