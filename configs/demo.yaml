@@ -1,0 +1,16 @@
+# configs/demo.yaml —— 初赛最小验证范围
+run:
+  company: 待定（李思婕 9/28 确认）
+  materials:
+    annual_2024: data/full/annual_2024.pdf
+    annual_2025: data/full/annual_2025.pdf
+    report_draft: data/demo/report_draft.md
+  user: member_e
+  offline: false
+paths:
+  fields: rules/fields.yaml
+  rules: rules/rules.yaml
+  tolerance: rules/tolerance.yaml
+  runs: runs
+outputs:
+  formats: [xlsx, html, pdf]

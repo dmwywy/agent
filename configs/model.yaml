@@ -1,0 +1,15 @@
+# configs/model.yaml —— 声明式配置，不含任何密钥
+provider: deepseek
+base_url: https://api.deepseek.com
+model_id: deepseek-flash
+allowed_models: [deepseek-flash, deepseek-v4-pro]
+params:
+  temperature: 0
+  top_p: 1
+  max_tokens: 1500
+  stream: false
+budget:
+  max_calls_per_run: 60
+  max_input_chars: 4000
+  max_output_tokens: 1500
+  concurrency: 2

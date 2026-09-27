@@ -12,12 +12,21 @@ DEFAULT_VERSION = "v1"
 
 
 def load_prompt(task: str, version: str = DEFAULT_VERSION) -> tuple[str, dict]:
-    """读取提示词原文，并返回其内容哈希（供 manifest 记录）"""
+    """读取提示词原文，并返回其内容哈希（供 manifest 记录）。
+    兼容两种命名：<task>.txt 与 <task>（无扩展名）。"""
     p = PROMPT_DIR / f"{task}.txt"
     if not p.exists():
-        raise FileNotFoundError(f"提示词文件不存在：{p}")
+        alt = PROMPT_DIR / task
+        if alt.exists():
+            p = alt
+        else:
+            raise FileNotFoundError(
+                f"提示词文件不存在：{p}（也未找到无扩展名的 {alt}）。"
+                f"约定文件名为 prompts/<task>.txt，可用任务：{list(SCHEMA_BY_TASK)}"
+            )
     text = p.read_text(encoding="utf-8")
-    meta = {"prompt_id": task, "version": version, "sha256": sha256_text(text)}
+    meta = {"prompt_id": task, "version": version, "sha256": sha256_text(text),
+            "file": p.name}
     return text, meta
 
 

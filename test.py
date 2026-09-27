@@ -1,56 +1,86 @@
 # test.py
-import json
+"""五个任务各跑一遍：验证 schema 校验路径，并生成缓存。
+运行：python test.py            在线（首次真实调用，之后命中缓存）
+      python test.py --offline  仅用缓存（评委复现，无需 Key、无需联网）"""
+import json, sys
 from pathlib import Path
-from src.llm import call, MODEL_ID, PARAMS, BASE_URL
+from src.tasks import call_task, load_prompt
 from src.manifest import new_manifest, save_manifest, sha256_text
+from src.llm import MODEL_ID, PARAMS, BASE_URL
+from src.inputs import (build_match_item, build_unit_period,
+                        build_match_claim, build_explain_anomaly)
 
-run_id = "20260927_test"
-PROMPT_PATH = Path("prompts/match_item.txt")
-PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
+RUN_ID = "20260927_test"
+OFFLINE = "--offline" in sys.argv
+OPERATOR = "member_e"
 
-payload = {
-    "headers": ["营业总收入", "营业收入", "其中：主营业务收入"],
-    "standard_items": [
-        {"code": "REVENUE", "name": "营业收入"},
-        {"code": "TOTAL_REVENUE", "name": "营业总收入"},
-    ],
-}
+CASES = [
+    ("match_item", build_match_item(
+        ["营业总收入", "营业收入", "其中：主营业务收入"],
+        [{"code": "REVENUE", "name": "营业收入"},
+         {"code": "TOTAL_REVENUE", "name": "营业总收入"}])),
 
-# [1] 先建清单
+    ("unit_period", build_unit_period(
+        "p042_t1",
+        "合并资产负债表   单位：万元   2025年12月31日   2024年12月31日",
+        {"unit": ["元", "千元", "万元", "百万元", "亿元", "unknown"],
+         "scope": ["CONSOLIDATED", "PARENT"],
+         "period_type": ["FY", "YTD", "BAL_END", "BAL_BEG", "UNKNOWN"]})),
+
+    ("match_claim", build_match_claim(
+        [{"claim_id": "c01", "sentence": "公司2025年营业收入为120亿元，同比增长22%"}],
+        [{"item_code": "REVENUE", "period": "FY2025"},
+         {"item_code": "REVENUE", "period": "FY2024"}])),
+
+    ("explain_anomaly", build_explain_anomaly(
+        "RF01", "研报引用值与财报值存在数量级差异", "p042_t1", "营业收入",
+        ["UNIT_SCALE", "PERIOD_MISMATCH", "SCOPE_MIXED",
+         "VALUE_ERROR", "SIGN_ERROR", "UNCERTAIN"])),
+
+    ("gen_report_text", {
+        "summary": "覆盖五个维度；多数规则通过；存在若干疑似不一致与待复核项",
+        "anomaly_items": ["营业收入"],
+    }),
+]
+
+# [1] 先建清单（5 条提示词全部登记）
+prompt_metas = []
+for task, _ in CASES:
+    _text, meta = load_prompt(task)
+    prompt_metas.append(meta)
+
 m = new_manifest(
-    run_id=run_id,
-    operator="member_e",
+    run_id=RUN_ID, operator=OPERATOR,
     model_cfg={"provider": "deepseek", "base_url": BASE_URL,
                "model_id": MODEL_ID, "params": PARAMS},
-    prompts=[{"prompt_id": "match_item", "version": "v1",
-              "sha256": sha256_text(PROMPT)}],
-    input_files=[PROMPT_PATH],          # 相对路径也能用了
+    prompts=prompt_metas,
+    input_files=[Path("prompts") / f"{t}.txt" for t, _ in CASES],
 )
 
-# [2] 再调用
-try:
-    data, status = call(PROMPT, payload, run_id=run_id, user_id="member_e")
-except Exception as e:
-    print("调用失败：", e)
-    m["status"] = "FAILED"
-    save_manifest(run_id, m)            # 失败也要落盘，便于追溯
-    raise SystemExit(1)
+# [2] 逐个任务调用
+print("=" * 62)
+for task, payload in CASES:
+    try:
+        data, status = call_task(task, payload, run_id=RUN_ID,
+                                 user_id=OPERATOR, offline=OFFLINE)
+    except Exception as e:
+        data, status = None, f"EXCEPTION:{type(e).__name__}: {e}"
 
-print("状态：", status)
-print(json.dumps(data, ensure_ascii=False, indent=2))
+    print(f"[{task}] 状态：{status}")
+    if data is not None:
+        print(json.dumps(data, ensure_ascii=False, indent=2)[:600])
 
-# [3] 统计并补全
-if status.startswith("API_OK"):
-    m["calls"]["api_ok"] += 1
-elif status == "CACHE_HIT":
-    m["calls"]["cache_hit"] += 1
-else:
-    m["calls"]["failed"] += 1
-m["calls"]["total"] += 1
-m["status"] = "OK" if data is not None else "PARTIAL"
+    if status.startswith("API_OK"):
+        m["calls"]["api_ok"] += 1
+    elif status == "CACHE_HIT":
+        m["calls"]["cache_hit"] += 1
+    else:
+        m["calls"]["failed"] += 1
+    m["calls"]["total"] += 1
+print("=" * 62)
 
-save_manifest(run_id, m)
-print("manifest 已写入：runs/%s/manifest.json" % run_id)
-
-data, status = call(PROMPT, payload, run_id=run_id,
-                    user_id="member_e", task="match_item")
+# [3] 补全并落盘
+m["status"] = "OK" if m["calls"]["failed"] == 0 else "PARTIAL"
+save_manifest(RUN_ID, m)
+print(f"manifest 已写入：runs/{RUN_ID}/manifest.json")
+print(f"调用统计：{m['calls']}")
