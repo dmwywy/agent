@@ -1,0 +1,28 @@
+# 凭据：绝不提交
+.env
+.env.*
+!.env.example
+
+# 运行产物：只保留基准缓存
+runs/*
+!runs/demo_baseline/
+!runs/demo_baseline/**
+
+# 备份与临时文件
+runs_backup/
+*.bak
+
+# 环境与缓存
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 编辑器
+.vscode/*
+!.vscode/settings.json
+
+# 大文件（走共享盘）
+data/full/
+*.zip
+*.mp4
