@@ -242,7 +242,10 @@ def compute_csi(results: list[dict], rules_cfg: dict) -> dict:
         v["score"] = round((v["pass"] + 0.5 * v["review"]) / n, 4)
 
     total_w = sum(weights[k] for k in live)
-    norm = {k: (round(weights[k] / total_w, 4) if total_w else 0.0) for k in weights}
+    # 不适用维度必须归零：它不参与 CSI 求和，若仍显示"原权重÷适用权重和"，
+    # 报告里会出现"C间 0.75"这种看着像有效权重的数字，误导审阅者。
+    norm = {k: (round(weights[k] / total_w, 4) if (total_w and k in live) else 0.0)
+            for k in weights}
     if not live or total_w == 0:
         return {"csi_version": rules_cfg["version"], "weights_used": weights,
                 "weights_normalized": norm, "dimensions": dims,

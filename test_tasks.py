@@ -448,3 +448,72 @@ def test_csi_normalizes_and_grades():
     assert ok["weights_normalized"]["C内"] == 1.0        # 只剩一个维度 → 权重归一到 1
     empty = compute_csi([], cfg)
     assert empty["csi"] is None and empty["grade"] == "NA"
+
+
+# ---------- G：核查报告生成 ----------
+
+def _make_run_fixture(run_id: str) -> None:
+    """造一个自包含的运行产物目录。
+
+    测试不得依赖仓库里既有的 runs/<某次运行>——那是本地产物，队友 clone 后不存在，
+    断言会因为"没数据"而失败（而不是因为代码错）。这里显式造数据。
+    """
+    from src.pipeline import ROOT
+    base = ROOT / "runs" / run_id
+    (base / "rules").mkdir(parents=True, exist_ok=True)
+    (base / "manifest.json").write_text(json.dumps(
+        {"calls": {"api_ok": 1, "cache_hit": 0, "cache_miss": 0, "failed": 0, "total": 1},
+         "model": {"model_id": "deepseek-flash"},
+         "prompts": [{"prompt_id": "match_item", "sha256": "a" * 64}]},
+        ensure_ascii=False), encoding="utf-8")
+    (base / "rules" / "results.json").write_text(json.dumps({"results": [
+        {"rule_id": "BS01@1.0", "dimension": "C内", "status": "FAIL", "period": "2024-12-31",
+         "expr": "TOTAL_ASSETS - (TOTAL_LIAB + TOTAL_EQUITY)", "diff": "2000.00",
+         "tolerance": "100.00", "severity": "HIGH",
+         "evidence": {"file": "a.docx", "locator": "表#92/第45行", "raw_text": "资产总计 …"}},
+        {"rule_id": "BS02@1.0", "dimension": "C内", "status": "PASS", "period": "2024-12-31"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    (base / "rules" / "csi.json").write_text(json.dumps({
+        "csi": 87.5, "grade": "B", "grade_label": "基本一致",
+        "weights_used": {"C内": 0.25}, "weights_normalized": {"C内": 1.0},
+        "dimensions": {"C内": {"score": 0.875, "rules_applicable": 2, "pass": 1,
+                               "fail": 1, "review": 0, "na": 0}},
+        "na_dimensions": [], "note": ""}, ensure_ascii=False), encoding="utf-8")
+
+
+def test_report_build_all_three_formats():
+    """三种报告都能生成，且都含免责声明（interfaces.md §6.3(3)）。"""
+    from openpyxl import load_workbook
+    from src.pipeline import ROOT
+    from src.report import DISCLAIMER, build_all
+
+    _make_run_fixture("pytest_report")
+    made = build_all("pytest_report", ("html", "xlsx", "pdf"))
+    assert set(made) == {"html", "xlsx", "pdf"}
+    for rel in made.values():
+        assert (ROOT / rel).stat().st_size > 0
+
+    html = (ROOT / made["html"]).read_text(encoding="utf-8")
+    assert DISCLAIMER in html and "CSI" in html
+
+    wb = load_workbook(ROOT / made["xlsx"])
+    assert {"摘要", "异常清单", "规则明细", "提取字段"} <= set(wb.sheetnames)
+    assert any(DISCLAIMER in str(c.value) for row in wb["摘要"].iter_rows()
+               for c in row if c.value)
+
+    with __import__("pdfplumber").open(ROOT / made["pdf"]) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    assert DISCLAIMER in text and "CSI" in text
+
+
+def test_na_dimensions_get_zero_normalized_weight():
+    """不适用维度不得显示非零归一化权重——否则报告里会出现误导性的权重数字。"""
+    from src.rules_engine import compute_csi
+    cfg = {"version": "1.0", "dimensions": {
+        "C内": {"weight": 0.25}, "C期": {"weight": 0.15},
+        "C间": {"weight": 0.30}, "C附": {"weight": 0.20}, "C研": {"weight": 0.10}}}
+    r = compute_csi([{"dimension": "C内", "status": "PASS"},
+                     {"dimension": "C期", "status": "PASS"}], cfg)
+    for na in ("C间", "C附", "C研"):
+        assert r["weights_normalized"][na] == 0.0, na
+    assert abs(sum(r["weights_normalized"].values()) - 1.0) < 1e-6

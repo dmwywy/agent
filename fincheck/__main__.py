@@ -82,6 +82,17 @@ def print_summary(run_id: str) -> None:
         print("  提示：本轮没有任何模型调用，请检查配置与输入文件是否就位。")
 
 
+def print_report(run_id: str, formats: str = "pdf,xlsx,html") -> None:
+    """生成三种形式的核查报告并打印路径。生成失败不阻断主流程。"""
+    from src.report import build_all
+    try:
+        made = build_all(run_id, tuple(f.strip() for f in formats.split(",") if f.strip()))
+    except Exception as e:                                   # noqa: BLE001
+        print(f"  报告生成失败   {type(e).__name__}: {e}")
+        return
+    print(f"  核查报告     " + "  ".join(f"{k}={v}" for k, v in made.items()))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="fincheck",
                                 description="财报一致性量化核查智能体")
@@ -101,15 +112,30 @@ def main(argv=None):
     g.add_argument("--year", type=int, default=None,
                    help="文件名里没有年份时用它作默认报告期")
 
+    rp = sub.add_parser("report", help="生成核查报告（PDF / Excel / 网页）")
+    rp.add_argument("--run-id", required=True)
+    rp.add_argument("--formats", default="pdf,xlsx,html",
+                    help="逗号分隔，可选 pdf,xlsx,html")
+
+    for sp in (r, g):
+        sp.add_argument("--no-report", action="store_true",
+                        help="跑完不自动生成报告")
+
     args = p.parse_args(argv)
     if args.cmd == "run":
         run(args.config, offline=args.offline, run_id=args.run_id)
         print_summary(args.run_id)
+        if not args.no_report:
+            print_report(args.run_id)
     elif args.cmd == "ingest":
         from src.ingest import ingest
         ingest(args.folder, args.run_id, offline=args.offline,
                config_path=args.config, default_year=args.year)
         print_summary(args.run_id)
+        if not args.no_report:
+            print_report(args.run_id)
+    elif args.cmd == "report":
+        print_report(args.run_id, args.formats)
     else:
         p.print_help()
 

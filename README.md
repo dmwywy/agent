@@ -203,7 +203,28 @@ macOS / Linux：
 **不写**共享的 `data/structured/`。因为 `load_structured` 会把目录下所有
 `*.json` 全读进来，若往共享目录堆文件，两批材料会混在一起用。
 
-### 8. 离线 mock 联调（无需 API Key）
+### 8. 核查报告（PDF / Excel / 网页）
+
+`ingest` 与 `run` 跑完会**自动生成**三种报告到 `runs/<run_id>/`；
+也可以单独重生成（只读产物，不重跑流程、不调模型）：
+
+    python -m fincheck report --run-id 20261005_demo
+    python -m fincheck report --run-id 20261005_demo --formats html    # 只要网页版
+
+| 文件 | 形式 | 用途 |
+|---|---|---|
+| `report.pdf` | 正式报告 | 计划书附图、答辩展示、归档 |
+| `report.xlsx` | 异常清单 | 可筛选排序，交金融侧逐条复核 |
+| `report.html` | 网页 | 点击查看证据、指标明细 |
+
+内容按《项目思路》第八步的 13 项组织，首页含免责声明
+（"本系统输出为财务数据一致性核查结果，不构成投资建议，所有结论需人工复核"）。
+**报告只呈现程序产物，不重算、不改写任何数值**——所以改完规则要重跑流程，
+只跑 `report` 不会更新结论。
+
+跑完不想生成报告可加 `--no-report`。
+
+### 9. 离线 mock 联调（无需 API Key）
 
 给还没有密钥、或想先验证契约的成员用：
 
@@ -216,7 +237,7 @@ macOS / Linux：
 推理参数 + 输入数据」算出，改动其中任一项都会让 mock 失效（表现为
 `NO_CACHE_OFFLINE`），需重新生成。
 
-### 9. 汇总测试
+### 10. 汇总测试
 
     python -m pytest -q
 
@@ -341,8 +362,10 @@ macOS / Linux：
 | `rules/research_claims.json` | **C研** 研报引用数值比对结果（PASS / FAIL / REVIEW） | ✅ |
 | `rules/results.json` | 表内 / 表间 / 跨期 / 附注 四维规则明细 | ⏸ 待数字经济B 交付 `src.rules_engine` |
 | `rules/csi.json` | 各维度得分与综合一致性指数 | ⏸ 同上 |
-| `rules/placeholder.json` | 上面两项未交付时的占位说明 | ✅ |
-| `report.*` | 核查报告（PDF / Excel / 网页） | ⏸ 待接入 |
+| `rules/placeholder.json` | 无年报可核查时的占位说明 | ✅ |
+| `report.pdf` | 核查报告正式版（13 项内容 + 免责声明） | ✅ |
+| `report.xlsx` | 多表工作簿：摘要 / 异常清单 / 规则明细 / 提取字段 / 研报引用 / 待人工复核 | ✅ |
+| `report.html` | 网页版报告，可点击查看证据 | ✅ |
 
 **查看结果**：`llm/*.json` 与 `rules/*.json` 都是 UTF-8、`sort_keys` 序列化的 JSON，
 可直接用编辑器或 Excel 打开比对。

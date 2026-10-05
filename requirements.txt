@@ -23,6 +23,7 @@ MarkupSafe==3.0.3
 narwhals==2.26.0
 numpy==2.4.6
 openai==3.19.2
+openpyxl==3.1.5
 packaging==26.3
 pandas==3.0.6
 pdfminer.six==20260107
@@ -44,6 +45,7 @@ python-dotenv==1.2.3
 python-multipart==0.0.32
 PyYAML==6.0.3
 referencing==0.37.0
+reportlab==4.2.5
 requests==2.34.2
 rpds-py==2026.6.3
 six==1.17.0
