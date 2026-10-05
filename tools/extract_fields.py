@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 import re
+import zipfile
 from pathlib import Path
 
 import pdfplumber
@@ -141,7 +142,119 @@ def scan_rows(numbered: list[tuple[int, str]]) -> list[tuple[str, str | None, st
     return rows
 
 
-def extract(pdf_path: Path, year: int) -> tuple[list[dict], dict]:
+def extract(src_path: Path, year: int) -> tuple[list[dict], dict]:
+    """按扩展名分派：PDF 走文本行扫描，docx 走 Word 表格解析。
+
+    为什么要支持 docx：现场测试时评委给的材料可能是 Word 文件（.doc/.docx），
+    而 pdfplumber 只吃 PDF。Word 表格有明确的单元格边界，解析反而比 PDF 更稳。
+    """
+    suffix = src_path.suffix.lower()
+    if suffix == ".pdf":
+        return _extract_pdf(src_path, year)
+    if suffix in (".docx", ".docm"):
+        return _extract_docx(src_path, year)
+    if suffix == ".doc":
+        raise SystemExit(
+            f"不支持旧版 .doc 二进制格式：{src_path.name}\n"
+            "  请先用 Word 另存为 .docx（或 PDF）再运行。")
+    raise SystemExit(f"无法识别的文件类型：{src_path.name}（支持 .pdf / .docx）")
+
+
+# ---- docx：按文档顺序遍历「段落 / 表格」，靠标题切换口径状态 ----
+_BODY_TOKEN_RE = re.compile(r"<w:tbl>.*?</w:tbl>|<w:p[ >].*?</w:p>", re.S)
+_CELL_VALUE_RE = re.compile(r"^-?[\d,]+\.\d{2}$")
+
+
+def _strip_tags(frag: str) -> str:
+    return re.sub(r"<[^>]+>", "", frag).strip()
+
+
+def _docx_rows(tbl_xml: str) -> list[list[str]]:
+    rows = []
+    for tr in re.findall(r"<w:tr[ >].*?</w:tr>", tbl_xml, re.S):
+        cells = [_strip_tags(tc) for tc in re.findall(r"<w:tc>.*?</w:tc>", tr, re.S)]
+        if any(cells):
+            rows.append(cells)
+    return rows
+
+
+def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
+    """从 Word 文档抽数。与 PDF 版共用同一套口径状态机与科目别名表。
+
+    定位方式用 locator（章节 + 表序号 + 行号）代替 page：
+    docx 是流式文档，没有固定分页，硬编页码等于伪造证据。
+    """
+    src_hash = sha256_file(src_path)
+    xml = zipfile.ZipFile(src_path).read("word/document.xml").decode("utf-8")
+    body = xml[xml.find("<w:body>"):]
+
+    records: list[dict] = []
+    chunk_index: dict[str, dict] = {}
+    seen: set[tuple[str, str]] = set()
+    state: str | None = None
+    heading = ""
+    table_no = 0
+
+    for m in _BODY_TOKEN_RE.finditer(body):
+        frag = m.group(0)
+        if frag.startswith("<w:tbl>"):
+            table_no += 1
+            if state is None:
+                continue
+            for ri, cells in enumerate(_docx_rows(frag)):
+                hit = LABEL_ALIASES.get(normalize_label(cells[0]))
+                if not hit:
+                    continue
+                item_code, stmt, period_type = hit
+                if stmt != state:
+                    continue
+                values = [c for c in cells[1:] if _CELL_VALUE_RE.match(c.strip())]
+                if not values:
+                    continue
+                locator = f"{heading or '未标章节'} / 表#{table_no} / 第{ri + 1}行"
+                chunk_id = f"t{table_no:03d}_r{ri + 1:02d}"
+                chunk_index.setdefault(chunk_id, {
+                    "locator": locator, "source": src_path.name,
+                    "chars": len(" ".join(cells))})
+                for value, period in zip(values, (year, year - 1)):
+                    if (item_code, str(period)) in seen:
+                        continue
+                    ptype = period_type
+                    if period_type.startswith("BAL") and period == year - 1:
+                        ptype = "BAL_BEG"
+                    seen.add((item_code, str(period)))
+                    records.append({
+                        "item_code": item_code,
+                        "item_raw": cells[0],
+                        "value": value.replace(",", ""),
+                        "unit_raw": "元",
+                        "period_type": ptype,
+                        "period": f"{period}-12-31" if period_type.startswith("BAL") else str(period),
+                        "scope": "CONSOLIDATED",
+                        "statement": stmt,
+                        "locator": locator,          # docx 源的定位凭据（§2.1 v1.3）
+                        "chunk_id": chunk_id,
+                        "raw_text": " | ".join(cells),
+                        "source_hash": src_hash,
+                        "parse_status": "OK",
+                        "confidence": 1.0,
+                    })
+        else:
+            text = _strip_tags(frag)
+            if text in CONSOLIDATED_TITLES:
+                state = CONSOLIDATED_TITLES[text]
+                heading = text        # 进入主表：章节名用表标题
+            elif text in CONTEXT_BREAKERS:
+                state = None          # 遇母公司报表/其他主表即切断，不混口径
+                heading = text
+            elif text and state is None:
+                # 只在表**外**更新标题。表内若也更新，locator 会被
+                # "单位：元 币种：人民币"这类紧跟标题的行覆盖掉。
+                heading = text
+    return records, chunk_index
+
+
+def _extract_pdf(pdf_path: Path, year: int) -> tuple[list[dict], dict]:
     """状态机逐页扫描：只在"合并"口径的表内抽数，遇到母公司报表即切断。"""
     src_hash = sha256_file(pdf_path)
     records: list[dict] = []
@@ -209,14 +322,16 @@ def extract(pdf_path: Path, year: int) -> tuple[list[dict], dict]:
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--pdf", required=True)
+    ap = argparse.ArgumentParser(description="从年报 PDF / Word 抽取结构化字段")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--input", help="年报文件（.pdf 或 .docx），按扩展名自动识别")
+    src.add_argument("--pdf", help="等同 --input，保留旧参数名")
     ap.add_argument("--year", type=int, required=True)
     ap.add_argument("--out", required=True, help="输出文件名前缀，如 贵州茅台_2024")
     args = ap.parse_args()
 
-    pdf_path = Path(args.pdf)
-    records, chunk_index = extract(pdf_path, args.year)
+    path = Path(args.input or args.pdf)
+    records, chunk_index = extract(path, args.year)
 
     out_dir = ROOT / "data" / "structured"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -230,7 +345,9 @@ def main():
     idx_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2, sort_keys=True),
                         encoding="utf-8")
 
-    print(f"提取 {len(records)} 条字段记录 -> data/structured/{args.out}.json")
+    where = "page" if records and "page" in records[0] else "locator"
+    print(f"提取 {len(records)} 条字段记录（来源 {path.suffix}，定位方式 {where}）"
+          f" -> data/structured/{args.out}.json")
     print(f"chunk_index 共 {len(merged)} 条 -> data/structured/chunk_index.json")
     missing = {v[0] for v in LABEL_ALIASES.values()} - {r["item_code"] for r in records}
     if missing:

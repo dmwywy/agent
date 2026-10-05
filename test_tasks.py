@@ -290,3 +290,54 @@ def test_research_check_passes_within_tolerance():
                 "value": "174144069958.25", "page": 63, "chunk_id": "p063_t1"}]
     out = check(matches, claims, records)
     assert out["results"][0]["status"] == "PASS"
+
+
+# ---------- E：文件夹入口 ----------
+
+def test_year_from_name():
+    """报告期从文件名识别；识别不到才用 --year 兜底。"""
+    from pathlib import Path
+    from src.ingest import year_from_name
+    assert year_from_name(Path("2024年年度报告.docx")) == 2024
+    assert year_from_name(Path("贵州茅台【2025全年】模拟研究报告.docx")) == 2025
+    assert year_from_name(Path("无年份.docx"), fallback=2023) == 2023
+
+
+def test_classify_by_content_not_filename(monkeypatch):
+    """按文件内容分类，不看文件名——各人写法不一，靠名字会误判。"""
+    from pathlib import Path
+    from src import ingest
+    monkeypatch.setattr(ingest, "read_text",
+                        lambda p: "合并资产负债表 合并利润表 合并现金流量表")
+    assert ingest.classify(Path("随便叫什么.docx"))[0] == "annual"
+    monkeypatch.setattr(ingest, "read_text",
+                        lambda p: "核心观点 投资评级 盈利预测 风险提示")
+    assert ingest.classify(Path("随便叫什么.docx"))[0] == "research"
+    monkeypatch.setattr(ingest, "read_text", lambda p: "一段无关的话")
+    assert ingest.classify(Path("随便叫什么.docx"))[0] == "unknown"
+
+
+def test_load_structured_ignores_non_field_records():
+    """目录里混入研报 claims（也是 JSON 数组）时不得被当成财报字段记录。"""
+    from src.pipeline import ROOT, load_structured
+    d = ROOT / "runs" / "pytest_struct"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "chunk_index.json").write_text('{"p001_t1": {"page": 1}}', encoding="utf-8")
+    (d / "fields.json").write_text(json.dumps(
+        [{"item_code": "REVENUE", "period": "2024", "value": "100.00"}],
+        ensure_ascii=False), encoding="utf-8")
+    (d / "claims.json").write_text(json.dumps(
+        [{"claim_id": "c1", "sentence": "营业收入 100 亿元"}], ensure_ascii=False),
+        encoding="utf-8")
+    got = load_structured("runs/pytest_struct")
+    assert len(got) == 1 and got[0]["item_code"] == "REVENUE"
+
+
+def test_claims_carry_source_hash():
+    """研报 claim 必须带内容哈希：文件名没变但内容被改时要能发现。"""
+    from src.ingest import ROOT
+    p = ROOT / "data" / "demo" / "研报claims_2024.json"
+    if not p.exists():
+        return                      # 基线缺失时跳过，不误报
+    claims = json.loads(p.read_text(encoding="utf-8"))
+    assert claims and all(len(c.get("source_hash", "")) == 64 for c in claims)

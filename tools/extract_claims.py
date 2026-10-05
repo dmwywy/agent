@@ -10,6 +10,7 @@
     python tools/extract_claims.py --docx <研报.docx> --tag 2024 --out 研报claims_2024
 """
 import argparse
+import hashlib
 import json
 import re
 import zipfile
@@ -58,6 +59,7 @@ def extract(path: Path, tag: str, tables_as_claims: bool = True) -> list[dict]:
     claims: list[dict] = []
     section = ""
     n = 0
+    src_hash = hashlib.sha256(path.read_bytes()).hexdigest()
 
     for pi, para in enumerate(paras):
         if SECTION_RE.match(para):
@@ -76,6 +78,8 @@ def extract(path: Path, tag: str, tables_as_claims: bool = True) -> list[dict]:
             claims.append({
                 "claim_id": f"r{tag}_p{pi:02d}_{n:03d}",
                 "source": path.name,
+                # 内容哈希：文件名相同但内容被改过时，靠它才能发现（§2.1 字段[12]）
+                "source_hash": src_hash,
                 "section": section,
                 "para": pi,
                 "kind": "TEXT",
@@ -93,6 +97,7 @@ def extract(path: Path, tag: str, tables_as_claims: bool = True) -> list[dict]:
                 claims.append({
                     "claim_id": f"r{tag}_t{ti:02d}_{ri:02d}",
                     "source": path.name,
+                    "source_hash": src_hash,
                     "section": f"表{ti + 1}",
                     "para": None,
                     "kind": "TABLE_ROW",

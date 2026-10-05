@@ -76,9 +76,23 @@ def main(argv=None):
     r.add_argument("--run-id", default="demo", help="运行编号（YYYYMMDD_用途）")
     r.add_argument("--offline", action="store_true", help="离线模式，只读缓存")
 
+    g = sub.add_parser("ingest", help="给一个文件夹，自动识别材料并跑完整流程")
+    g.add_argument("--from", dest="folder", required=True,
+                   help="存放材料的文件夹（可混放年报与研究报告）")
+    g.add_argument("--config", default="configs/demo.yaml", help="配置文件路径")
+    g.add_argument("--run-id", default="ingest", help="运行编号")
+    g.add_argument("--offline", action="store_true", help="离线模式，只读缓存")
+    g.add_argument("--year", type=int, default=None,
+                   help="文件名里没有年份时用它作默认报告期")
+
     args = p.parse_args(argv)
     if args.cmd == "run":
         run(args.config, offline=args.offline, run_id=args.run_id)
+        print_summary(args.run_id)
+    elif args.cmd == "ingest":
+        from src.ingest import ingest
+        ingest(args.folder, args.run_id, offline=args.offline,
+               config_path=args.config, default_year=args.year)
         print_summary(args.run_id)
     else:
         p.print_help()

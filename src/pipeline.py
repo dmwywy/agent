@@ -42,8 +42,12 @@ def load_structured(data_dir: str) -> list[dict]:
             continue        # 配套的 chunk_id → 页码映射表，不是字段记录（§2.3）
         payload = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(payload, list):
-            continue        # 非字段记录数组一律跳过，避免污染后续流程
-        records.extend(payload)
+            continue        # 非数组一律跳过
+        # 只收"字段记录"：必须带 item_code 与 value。
+        # 目录里可能同时有研报 claims（也是数组），不按形状过滤会被当成字段记录，
+        # 下游 _claim_fields 取 r["item_code"] 时直接 KeyError。
+        records.extend(r for r in payload
+                       if isinstance(r, dict) and "item_code" in r and "value" in r)
     return records
 
 
@@ -237,12 +241,20 @@ def run_rules_engine(records: list[dict], run_id: str, offline: bool):
     return run_rules(records, run_id, offline)
 
 
-def run(config_path: str, offline: bool = False, run_id: str = "demo") -> dict:
-    """入口：加载配置 → 解析数据 → 语义提取 → 规则核查（钩子）→ 落盘清单。"""
+def run(config_path: str, offline: bool = False, run_id: str = "demo",
+        claims_override: str | None = None,
+        data_dir_override: str | None = None) -> dict:
+    """入口：加载配置 → 解析数据 → 语义提取 → 规则核查（钩子）→ 落盘清单。
+
+    claims_override / data_dir_override：由文件夹入口（src.ingest）传入本次现场
+    解析出来的数据位置。必须覆盖默认的共享目录——共享目录是"策展好的基线"，
+    而 load_structured 会把目录下所有 json 全读进来，现场材料混进去会串数据。
+    """
     cfg = load_config(config_path)
-    data_dir = cfg.get("paths", {}).get("structured", "data/structured")
+    data_dir = (data_dir_override
+                or cfg.get("paths", {}).get("structured", "data/structured"))
     materials = cfg.get("run", {}).get("materials", {})
-    claims_path = materials.get("report_claims", "")
+    claims_path = claims_override or materials.get("report_claims", "")
     operator = cfg.get("run", {}).get("user", "team")
 
     records = load_structured(data_dir)
