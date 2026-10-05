@@ -35,6 +35,11 @@ fields:
   CF_NET_INCREASE:   {zh: 现金及现金等价物净增加额,   type: amount, statement: CF, period: FY, source: MAIN, core: true}
   CASH_EQ_END:       {zh: 期末现金及现金等价物余额,   type: amount, statement: CF, period: BAL_END, source: MAIN, core: true}
 
+  # ---- 附注明细（来源于"七、合并财务报表项目注释"与"现金流量表补充资料"）----
+  # 用途：主表汇总数 vs 附注明细（C附），以及同一指标在两处报表是否一致（C间）
+  SUPP_NET_PROFIT:   {zh: 补充资料净利润,        type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_CF_OPERATING: {zh: 补充资料经营活动现金流量净额, type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+
   # ---- 附注来源（必须带 note_ref，否则无法定位证据）----
   CASH_ON_HAND:      {zh: 库存现金,          type: amount,  statement: NOTE, period: BAL_END, source: NOTE, note_ref: "附注七、1 货币资金", core: false}
   CASH_IN_BANK:      {zh: 银行存款,          type: amount,  statement: NOTE, period: BAL_END, source: NOTE, note_ref: "附注七、1 货币资金", core: false}

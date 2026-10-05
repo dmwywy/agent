@@ -59,6 +59,32 @@ rules:
     severity: MED
     source: "年报-第十节-合并资产负债表 + 附注七、1 货币资金"
 
+  # ---- 表间一致（C间）----
+  # 转录自《贵州茅台一致性规则表（改）》第 13 / 16 条：同一指标在不同报表中
+  # 出现时必须相等。用现金流量表补充资料作对照——它同时披露净利润与
+  # 经营活动现金流量净额，正好可与利润表、现金流量表交叉核对。
+  - rule_id: LJ01
+    dimension: C间
+    object: 利润表净利润=现金流量表补充资料净利润
+    expr: "NET_PROFIT - SUPP_NET_PROFIT"
+    requires: [NET_PROFIT, SUPP_NET_PROFIT]
+    scope: CONSOLIDATED
+    tolerance: MAIN_TABLE
+    severity: HIGH
+    applicable_if: "财报披露了现金流量表补充资料"
+    source: "规则表 第13条"
+
+  - rule_id: LJ02
+    dimension: C间
+    object: 现金流量表经营净额=补充资料经营净额
+    expr: "CF_OPERATING - SUPP_CF_OPERATING"
+    requires: [CF_OPERATING, SUPP_CF_OPERATING]
+    scope: CONSOLIDATED
+    tolerance: MAIN_TABLE
+    severity: MED
+    applicable_if: "财报披露了现金流量表补充资料"
+    source: "规则表 第16条（取净额一项作交叉核对）"
+
   # ---- 跨期间衔接（C期）----
   # 转录自《贵州茅台一致性规则表（改）》第 20 / 21 / 23 条：
   # 本期期初数应等于上期期末数。同一时点（如 2024-12-31）在两份年报里

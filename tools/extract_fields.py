@@ -74,9 +74,20 @@ LABEL_ALIASES = {
 # 结构："七、合并财务报表项目注释" 下的 "1、 货币资金" 小节，后跟一张
 # 【项目 | 期末余额 | 期初余额】表。用于把主表的汇总数拆到明细科目上，
 # 从而核对"主表货币资金 = 库存现金 + 银行存款 + 其他货币资金"。
+# 每个附注小节的期间性质不同，必须分开标注（interfaces.md §1.5 期间不许混）：
+#   货币资金     → 期末余额/期初余额，是**时点数**
+#   补充资料     → 本期金额/上期金额，是**时期数**
+# 无差别标成 BAL_END 会把时期数当存量，进而与利润表混算。
 NOTE_TARGETS = {
-    "货币资金": {"库存现金": "CASH_ON_HAND", "银行存款": "CASH_IN_BANK",
-                 "其他货币资金": "CASH_OTHER"},
+    "货币资金": {"period": "BAL", "items": {
+        "库存现金": "CASH_ON_HAND", "银行存款": "CASH_IN_BANK",
+        "其他货币资金": "CASH_OTHER"}},
+    # 用于表间核对：同一"净利润"在利润表与补充资料里应一致；
+    # "经营活动现金流量净额"在现金流量表与补充资料里也应一致。
+    # 年报里该小节标题写作"金流量表补充资料"（原件漏了"现"字），故用「包含」匹配。
+    "现金流量表补充资料": {"period": "FY", "items": {
+        "净利润": "SUPP_NET_PROFIT",
+        "经营活动产生的现金流量净额": "SUPP_CF_OPERATING"}},
 }
 # 附注小节标题形如 "1、 货币资金√适用"（后面可能粘着适用性标记）。
 # ★ 编号分隔符必须同时接受全角顿号与半角句点：实测 2024 年报用 "1、货币资金"，
@@ -218,8 +229,9 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
             table_no += 1
             # 附注明细表：按"项目 | 期末 | 期初"取目标明细科目
             if note in NOTE_TARGETS:
+                spec = NOTE_TARGETS[note]
                 for ri, cells in enumerate(_docx_rows(frag)):
-                    code = NOTE_TARGETS[note].get(cells[0].strip())
+                    code = spec["items"].get(cells[0].strip())
                     if not code:
                         continue
                     vals = [c for c in cells[1:] if _CELL_VALUE_RE.match(c.strip())]
@@ -234,11 +246,17 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
                         if (code, str(period)) in seen:
                             continue
                         seen.add((code, str(period)))
+                        if spec["period"] == "BAL":
+                            ptype = "BAL_END" if period == year else "BAL_BEG"
+                            pval = f"{period}-12-31"
+                        else:
+                            ptype = "FY"          # 时期数：本期/上期金额
+                            pval = str(period)
                         records.append({
                             "item_code": code, "item_raw": cells[0].strip(),
                             "value": value.replace(",", ""), "unit_raw": "元",
-                            "period_type": "BAL_END" if period == year else "BAL_BEG",
-                            "period": f"{period}-12-31", "scope": "CONSOLIDATED",
+                            "period_type": ptype, "period": pval,
+                            "scope": "CONSOLIDATED",
                             "statement": "NOTE", "locator": locator,
                             "chunk_id": chunk_id, "raw_text": " | ".join(cells),
                             "source_hash": src_hash, "parse_status": "OK",
@@ -296,8 +314,13 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
                 heading = text
             else:
                 nm = NOTE_HEADING_RE.match(text)
-                if nm:
-                    note = nm.group(1)        # 进入某个附注小节
+                # 先按「包含」匹配已知附注小节（原件标题可能有错字，如"金流量表补充资料"），
+                # 匹配不到再退回编号标题本身（那种小节不在 NOTE_TARGETS 里，不会被抽）
+                hit_note = next((k for k in NOTE_TARGETS if k in text), None)
+                if hit_note:
+                    note = hit_note
+                elif nm:
+                    note = nm.group(1)
                 if text and state is None:
                     # 只在表**外**更新标题。表内若也更新，locator 会被
                     # "单位：元 币种：人民币"这类紧跟标题的行覆盖掉。
