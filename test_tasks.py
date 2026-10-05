@@ -341,3 +341,35 @@ def test_claims_carry_source_hash():
         return                      # 基线缺失时跳过，不误报
     claims = json.loads(p.read_text(encoding="utf-8"))
     assert claims and all(len(c.get("source_hash", "")) == 64 for c in claims)
+
+
+def test_malformed_unit_does_not_crash():
+    """畸形单位（亿万元/千万元）必须判单位错误，且不得因量级字查表抛 KeyError。"""
+    from src.research_check import associate_figures, check
+    zh = {"TOTAL_REVENUE": "营业总收入", "NP_PARENT": "归属母公司股东的净利润"}
+    for unit in ("亿万元", "千万元"):
+        got = associate_figures(f"归母净利润 862.3 {unit}", zh)
+        assert got["NP_PARENT"]["bad_unit"] == unit, unit
+
+    # 端到端：不得抛异常，且判 FAIL/UNIT_SCALE
+    matches = [{"claim_id": "c1", "item_code": "TOTAL_REVENUE", "period": "2025",
+                "evidence": {}}]
+    out = check(matches, {"c1": {"sentence": "营业总收入 1721 千万元"}},
+                [{"item_code": "TOTAL_REVENUE", "period": "2025", "period_type": "FY",
+                  "value": "172054171890.91", "page": 61, "chunk_id": "p061_t1"}])
+    assert out["results"][0]["status"] == "FAIL"
+    assert out["results"][0]["cause"] == "UNIT_SCALE"
+
+
+def test_research_check_survives_bad_sentence(monkeypatch):
+    """单条解析异常只丢该条转人工复核，不得打断整体流程。"""
+    from src import research_check as RC
+    monkeypatch.setattr(RC, "associate_figures",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")))
+    out = RC.check(
+        [{"claim_id": "c1", "item_code": "REVENUE", "period": "2024", "evidence": {}}],
+        {"c1": {"sentence": "营业收入 100 亿元"}},
+        [{"item_code": "REVENUE", "period": "2024", "period_type": "FY",
+          "value": "10000000000.00", "page": 63, "chunk_id": "p063_t1"}])
+    assert out["results"] == []
+    assert out["review"] and "解析异常" in out["review"][0]["reason"]

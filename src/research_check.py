@@ -34,6 +34,7 @@ UNIT_SCALE = {
     "万元": Decimal("10000"),
     "万":   Decimal("10000"),
     "千元": Decimal("1000"),
+    "千":   Decimal("1000"),
     "元":   Decimal("1"),
 }
 # 单位整体捕获（可含多个量级字，如"亿万元"），再校验是否合法。
@@ -145,9 +146,11 @@ def associate_figures(sentence: str, zh_map: dict) -> dict[str, dict]:
         if unit in UNIT_SCALE:
             value, bad_unit = val * UNIT_SCALE[unit], ""
         else:
-            # 形如"亿万元"的畸形单位：按首个量级字估值以便比较，同时标记单位异常
+            # 形如"亿万元"的畸形单位：按首个量级字估值以便比较，同时标记单位异常。
+            # 用 .get 兜底——量级字表与 UNIT_SCALE 的键不保证完全对齐，
+            # 直接索引会抛 KeyError 把整条流程打断（实测踩过 "千"）。
             head = next((u for u in ("万亿", "亿", "万", "千") if unit.startswith(u)), "元")
-            value, bad_unit = val * UNIT_SCALE[head], unit
+            value, bad_unit = val * UNIT_SCALE.get(head, Decimal("1")), unit
 
         # 同一指标在句中多次出现时，保留第一次（研报通常先给主口径）
         out.setdefault(owner[2], {
@@ -220,7 +223,14 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
                             "reason": "研报为单季/半年度口径，与年度累计不可比"})
             continue
 
-        figs = associate_figures(sentence, zh_map)
+        # 单条解析异常不得打断整体流程（与 llm 侧"失败转人工复核"一致）：
+        # 某句研报措辞触发解析边界时，只丢这一条，其余照常比对。
+        try:
+            figs = associate_figures(sentence, zh_map)
+        except Exception as e:                                  # noqa: BLE001
+            skipped.append({**base, "status": "REVIEW",
+                            "reason": f"句内金额解析异常（{type(e).__name__}: {e}），需人工复核"})
+            continue
         fig = figs.get(code)
         if not fig:
             skipped.append({**base, "status": "REVIEW",
