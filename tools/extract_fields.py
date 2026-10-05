@@ -63,6 +63,9 @@ LABEL_ALIASES = {
     "归属于母公司股东的净利润": ("NP_PARENT", "IS", "FY"),
     "归属于母公司所有者的净利润": ("NP_PARENT", "IS", "FY"),
     "经营活动产生的现金流量净额": ("CF_OPERATING", "CF", "FY"),
+    "投资活动产生的现金流量净额": ("CF_INVESTING", "CF", "FY"),
+    "筹资活动产生的现金流量净额": ("CF_FINANCING", "CF", "FY"),
+    "汇率变动对现金及现金等价物的影响": ("CF_FX_EFFECT", "CF", "FY"),
     "现金及现金等价物净增加额": ("CF_NET_INCREASE", "CF", "FY"),
     "期末现金及现金等价物余额": ("CASH_EQ_END", "CF", "BAL_END"),
 }

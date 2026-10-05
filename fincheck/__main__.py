@@ -57,9 +57,25 @@ def print_summary(run_id: str) -> None:
 
     rules = _read(base / "rules" / "results.json")
     if rules is not None:
-        print(f"  规则核查     {len(rules.get('results', []))} 条")
-    elif (base / "rules" / "placeholder.json").exists():
-        print("  规则核查     跳过（数字经济B 的 src.rules_engine 尚未交付）")
+        got = {}
+        for r in rules.get("results", []):
+            got[r.get("status")] = got.get(r.get("status"), 0) + 1
+        detail = "  ".join(f"{k}={v}" for k, v in sorted(got.items()))
+        print(f"  规则核查     {len(rules.get('results', []))} 条  {detail}")
+
+    csi = _read(base / "rules" / "csi.json")
+    if csi is not None and csi.get("csi") is not None:
+        print(f"  一致性指数   CSI={csi['csi']}  等级 {csi['grade']}（{csi.get('grade_label', '')}）")
+        parts = [f"{k}:{v['score']}" for k, v in sorted(csi.get("dimensions", {}).items())
+                 if v.get("score") is not None]
+        if parts:
+            print(f"    分项       {'  '.join(parts)}")
+        na = csi.get("na_dimensions") or []
+        if na:
+            print(f"    不适用维度 {','.join(na)}（无可执行规则，权重已分摊）")
+
+    if rules is None and csi is None and (base / "rules" / "placeholder.json").exists():
+        print("  规则核查     跳过（未识别出年报，或无可执行规则）")
 
     print(f"  产物目录     runs/{run_id}/")
     if not calls or calls.get("total", 0) == 0:

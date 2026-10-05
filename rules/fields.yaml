@@ -29,6 +29,9 @@ fields:
 
   # ---- 现金流量表 ----
   CF_OPERATING:      {zh: 经营活动产生的现金流量净额, type: amount, statement: CF, period: FY, source: MAIN, core: true}
+  CF_INVESTING:      {zh: 投资活动产生的现金流量净额, type: amount, statement: CF, period: FY, source: MAIN, core: true}
+  CF_FINANCING:      {zh: 筹资活动产生的现金流量净额, type: amount, statement: CF, period: FY, source: MAIN, core: true}
+  CF_FX_EFFECT:      {zh: 汇率变动对现金及现金等价物的影响, type: amount, statement: CF, period: FY, source: MAIN, core: false}
   CF_NET_INCREASE:   {zh: 现金及现金等价物净增加额,   type: amount, statement: CF, period: FY, source: MAIN, core: true}
   CASH_EQ_END:       {zh: 期末现金及现金等价物余额,   type: amount, statement: CF, period: BAL_END, source: MAIN, core: true}
 

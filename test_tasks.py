@@ -373,3 +373,78 @@ def test_research_check_survives_bad_sentence(monkeypatch):
           "value": "10000000000.00", "page": 63, "chunk_id": "p063_t1"}])
     assert out["results"] == []
     assert out["review"] and "解析异常" in out["review"][0]["reason"]
+
+
+# ---------- F：规则引擎（只凭财报就出结果）----------
+
+def test_safe_eval_only_arithmetic():
+    """规则表达式求值必须拒绝任意代码，只放行 Decimal 四则运算。"""
+    from decimal import Decimal
+    from src.rules_engine import ExpressionError, safe_eval
+    env = {"A": Decimal("10"), "B": Decimal("4")}
+    assert safe_eval("A - (B + 1)", env) == Decimal("5")
+    assert safe_eval("-A", env) == Decimal("-10")
+    for bad in ("__import__('os')", "A.__class__", "A if A else B"):
+        try:
+            safe_eval(bad, env)
+            raise AssertionError(f"应当拒绝：{bad}")
+        except (ExpressionError, SyntaxError):
+            pass
+
+
+def test_rules_engine_balance_sheet_identity():
+    """资产=负债+权益 成立时判 PASS，人为改动后判 FAIL。"""
+    from src.rules_engine import run_rules
+    base = [
+        {"item_code": "TOTAL_ASSETS", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "1000.00", "unit_raw": "元", "raw_text": "资产总计 1000.00"},
+        {"item_code": "TOTAL_LIAB", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "400.00", "unit_raw": "元", "raw_text": "负债合计 400.00"},
+        {"item_code": "TOTAL_EQUITY", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "600.00", "unit_raw": "元", "raw_text": "所有者权益合计 600.00"},
+    ]
+    out = run_rules(base, "pytest_rules_ok")
+    bs01 = [r for r in out["results"] if r["rule_id"].startswith("BS01")]
+    assert bs01 and bs01[0]["status"] == "PASS"
+
+    broken = [dict(r) for r in base]
+    broken[0]["value"] = "1234.00"          # 人为破坏平衡
+    out2 = run_rules(broken, "pytest_rules_bad")
+    bs01b = [r for r in out2["results"] if r["rule_id"].startswith("BS01")]
+    assert bs01b[0]["status"] == "FAIL"
+    assert bs01b[0]["diff"] == "234.00"
+
+
+def test_rules_engine_missing_fields_are_na_not_fail():
+    """字段缺失判 NA（不计入分母），不得判 FAIL——否则是误报。"""
+    from src.rules_engine import run_rules
+    out = run_rules([
+        {"item_code": "CASH_END", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "100.00", "unit_raw": "元", "raw_text": "货币资金 100.00"},
+    ], "pytest_rules_na")
+    nb = [r for r in out["results"] if r["rule_id"].startswith("NB01")]
+    assert nb and all(r["status"] == "NA" for r in nb)
+
+
+def test_cross_period_rule_detects_mismatch():
+    """同一时点的期末数 vs 下一年报的期初数不等时应判 FAIL。"""
+    from src.rules_engine import run_rules
+    out = run_rules([
+        {"item_code": "CASH_END", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "100.00", "unit_raw": "元", "raw_text": "货币资金 100.00"},
+        {"item_code": "CASH_END", "period": "2024-12-31", "period_type": "BAL_BEG",
+         "value": "999.00", "unit_raw": "元", "raw_text": "货币资金 999.00"},
+    ], "pytest_cross")
+    xq = [r for r in out["results"] if r["rule_id"].startswith("XQ_CASH")]
+    assert xq and xq[0]["status"] == "FAIL"
+
+
+def test_csi_normalizes_and_grades():
+    """CSI 只对有可执行规则的维度归一化；全不可执行时输出 null 而非 0。"""
+    from src.rules_engine import compute_csi
+    cfg = {"version": "1.0", "dimensions": {"C内": {"weight": 0.25}, "C研": {"weight": 0.10}}}
+    ok = compute_csi([{"dimension": "C内", "status": "PASS"}], cfg)
+    assert ok["csi"] == 100.0 and ok["grade"] == "A"
+    assert ok["weights_normalized"]["C内"] == 1.0        # 只剩一个维度 → 权重归一到 1
+    empty = compute_csi([], cfg)
+    assert empty["csi"] is None and empty["grade"] == "NA"

@@ -39,11 +39,15 @@ rules:
 
   - rule_id: CF01
     dimension: C内
-    expr: "CF_NET_INCREASE - (CF_OPERATING)"      # 完整式应含投资与筹资净额，字段补齐后改为三项和
-    requires: [CF_NET_INCREASE, CF_OPERATING]
+    # 完整式：现金及现金等价物净增加额 = 经营 + 投资 + 筹资 + 汇率变动影响
+    # 此前只写 CF_OPERATING 一项，等式本就不该成立，必然误报；
+    # 补齐 CF_INVESTING / CF_FINANCING / CF_FX_EFFECT 三个字段后改为完整式。
+    expr: "CF_NET_INCREASE - (CF_OPERATING + CF_INVESTING + CF_FINANCING + CF_FX_EFFECT)"
+    requires: [CF_NET_INCREASE, CF_OPERATING, CF_INVESTING, CF_FINANCING, CF_FX_EFFECT]
     scope: CONSOLIDATED
     tolerance: MAIN_TABLE
     severity: MED
+    applicable_if: "现金流量表披露了投资/筹资/汇率变动三项"
     source: "年报-第十节-合并现金流量表"
 
   - rule_id: NB01
@@ -54,6 +58,42 @@ rules:
     tolerance: NOTE_DETAIL
     severity: MED
     source: "年报-第十节-合并资产负债表 + 附注七、1 货币资金"
+
+  # ---- 跨期间衔接（C期）----
+  # 转录自《贵州茅台一致性规则表（改）》第 20 / 21 / 23 条：
+  # 本期期初数应等于上期期末数。同一时点（如 2024-12-31）在两份年报里
+  # 分别以"本期期末"和"下期期初"出现，两者必须相等。
+  # 注：该表第 19 条（固定资产**原值**期初=上期期末）**未转录**——
+  #     本项目提取的是固定资产**净额**，照搬会用错口径。需先补原值字段。
+  - rule_id: XQ_CASH
+    dimension: C期
+    kind: cross_period
+    object: 货币资金期初=上期期末
+    item: CASH_END
+    tolerance: CROSS_YEAR
+    severity: HIGH
+    applicable_if: "存在会计政策变更或追溯重述时转人工复核"
+    source: "规则表 第21条"
+
+  - rule_id: XQ_AR
+    dimension: C期
+    kind: cross_period
+    object: 应收账款期初=上期期末
+    item: AR_NET
+    tolerance: CROSS_YEAR
+    severity: HIGH
+    applicable_if: "存在报表重分类或前期差错更正时转人工复核"
+    source: "规则表 第20/22条"
+
+  - rule_id: XQ_INV
+    dimension: C期
+    kind: cross_period
+    object: 存货期初=上期期末
+    item: INVENTORY
+    tolerance: CROSS_YEAR
+    severity: MED
+    applicable_if: "存在存货计价政策变更或追溯重述时转人工复核"
+    source: "规则表 第23条"
 
 # 每条规则可附加的三个可选字段（CSV/Excel 版规则表的补充）：
 #   applicable_if:      适用条件（不满足则记 NA，不计入分母）
