@@ -153,10 +153,43 @@ macOS / Linux：
 
     python check_key.py
 
-### 6. 待接入的命令（开发中）
+### 6. 跑完整流程（主入口）
 
-    python -m fincheck run --config configs/demo.yaml              # 在线运行
-    python -m fincheck run --config configs/demo.yaml --offline    # 离线复现
+    python -m fincheck run --config configs/demo.yaml --run-id 20261005_demo
+
+跑完会打印一份运行摘要：
+
+    运行完成  run_id = 20261005_demo
+      模型调用     api_ok=3  cache_hit=0  failed=0  合计=3
+      科目归一化   API_OK(try=1)  22 条（待复核 0）
+      研报引用匹配 API_OK(try=1)  53 条（覆盖 39/39 条 claim，待复核 0）
+      C研 数值比对 FAIL=1  PASS=1（待人工复核 51）
+      规则核查     跳过（数字经济B 的 src.rules_engine 尚未交付）
+      产物目录     runs/20261005_demo/
+
+**在线模式**需要 `.env` 里的 `DEEPSEEK_API_KEY`；**离线模式**不需要密钥、不联网：
+
+    python -m fincheck run --config configs/demo.yaml --run-id 20261005_demo --offline
+
+离线模式只读 `runs/<run_id>/llm_cache/` 里的缓存。若某条没有缓存，它会记为
+`NO_CACHE_OFFLINE` 并转入人工复核，**不会**发起网络请求。
+
+### 7. 离线 mock 联调（无需 API Key）
+
+给还没有密钥、或想先验证契约的成员用：
+
+    python tools/make_mock.py --task match_item  --run-id mytest --emit-template
+    python tools/make_mock.py --task match_claim --run-id mytest --emit-template
+    python -m fincheck run --config configs/demo.yaml --run-id mytest --offline
+
+`--emit-template` 写出符合 `src/schemas.py` 的骨架响应；也可以用
+`--response <自己的json>` 覆盖。**注意**：缓存键由「提示词内容 + 模型标识 +
+推理参数 + 输入数据」算出，改动其中任一项都会让 mock 失效（表现为
+`NO_CACHE_OFFLINE`），需重新生成。
+
+### 8. 汇总测试
+
+    python -m pytest -q
 
 ---
 
@@ -239,18 +272,28 @@ macOS / Linux：
 
 ## 八、输出产物
 
-每次运行在 `runs/<run_id>/` 下生成：
+所有结果都在 **`runs/<run_id>/`** 目录下（`runs/` 已加入 `.gitignore`，不提交）。
+一次完整运行产生：
 
-| 文件 | 内容 |
-|---|---|
-| `manifest.json` | 运行清单：模型标识、推理参数、提示词哈希、输入文件哈希、依赖版本、调用统计 |
-| `logs.jsonl` | 事件记录：每次出站连接、每次模型调用及其状态与耗时 |
-| `llm_cache/*.json` | 模型原始返回内容，用于离线重放 |
-| `rules/results.json` | 规则核查结果明细 |
-| `rules/csi.json` | 各维度得分与综合一致性指数 |
-| `report.*` | 核查报告（PDF、Excel、网页三种形式） |
+| 路径 | 内容 | 状态 |
+|---|---|---|
+| `manifest.json` | 运行清单：模型标识、推理参数、提示词哈希、输入文件哈希、依赖版本、调用统计 | ✅ |
+| `logs.jsonl` | 事件记录（JSONL，追加写）：每次模型调用及状态、耗时、缓存键前 16 位 | ✅ |
+| `llm_cache/*.json` | 模型响应缓存，**离线重放就靠它** | ✅ |
+| `llm/mappings.json` | 科目归一化结果：财报原文科目名 → 标准科目编号，含程序回填的来源证据 | ✅ |
+| `llm/claim_matches.json` | 研报引用匹配：每条 claim → 科目 + 期间 | ✅ |
+| `rules/research_claims.json` | **C研** 研报引用数值比对结果（PASS / FAIL / REVIEW） | ✅ |
+| `rules/results.json` | 表内 / 表间 / 跨期 / 附注 四维规则明细 | ⏸ 待数字经济B 交付 `src.rules_engine` |
+| `rules/csi.json` | 各维度得分与综合一致性指数 | ⏸ 同上 |
+| `rules/placeholder.json` | 上面两项未交付时的占位说明 | ✅ |
+| `report.*` | 核查报告（PDF / Excel / 网页） | ⏸ 待接入 |
 
-运行清单中的 `calls` 字段分别统计 `api_ok`、`cache_hit`、`failed`，用于核对实际调用次数。
+**查看结果**：`llm/*.json` 与 `rules/*.json` 都是 UTF-8、`sort_keys` 序列化的 JSON，
+可直接用编辑器或 Excel 打开比对。
+
+运行清单中的 `calls` 字段统计 `api_ok` / `cache_hit` / `failed`。
+注意 `logs.jsonl` 是**追加写**的，同一 `run_id` 重跑会累积；`calls` 已按
+`started_at` 过滤，只计本轮。想彻底干净就换个 `run_id`。
 
 ---
 

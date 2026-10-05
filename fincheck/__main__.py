@@ -28,8 +28,11 @@ def print_summary(run_id: str) -> None:
     if calls:
         print(f"  模型调用     api_ok={calls.get('api_ok', 0)}  "
               f"cache_hit={calls.get('cache_hit', 0)}  "
+              f"cache_miss={calls.get('cache_miss', 0)}  "
               f"failed={calls.get('failed', 0)}  "
               f"合计={calls.get('total', 0)}")
+        if calls.get("cache_miss") and not calls.get("failed"):
+            print("               （cache_miss = 离线且无缓存，属预期，相关条目已转人工复核）")
 
     mappings = _read(base / "llm" / "mappings.json")
     if mappings is not None:

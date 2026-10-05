@@ -92,7 +92,7 @@ def summarize_calls(run_id: str, since: str | None = None) -> dict:
     同一 run_id 重跑时不会把上一轮算进来。
     """
     p = ROOT / "runs" / run_id / "logs.jsonl"
-    counts = {"api_ok": 0, "cache_hit": 0, "failed": 0, "total": 0}
+    counts = {"api_ok": 0, "cache_hit": 0, "cache_miss": 0, "failed": 0, "total": 0}
     if not p.exists():
         return counts
     for line in p.read_text(encoding="utf-8").splitlines():
@@ -109,6 +109,10 @@ def summarize_calls(run_id: str, since: str | None = None) -> dict:
             counts["api_ok"] += 1
         elif status == "CACHE_HIT":
             counts["cache_hit"] += 1
+        elif status == "NO_CACHE_OFFLINE":
+            # 离线模式无缓存是**预期行为**，不是故障：该条转人工复核即可。
+            # 与真实失败分开计数，否则离线跑一趟会显示一堆 failed，误导使用者。
+            counts["cache_miss"] += 1
         else:
             counts["failed"] += 1
         counts["total"] += 1
