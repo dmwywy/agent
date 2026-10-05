@@ -274,18 +274,39 @@ def run(config_path: str, offline: bool = False, run_id: str = "demo",
                               if claims_path else (None, "NOT_CONFIGURED"))
     # 2b. C研 维度数值比对（确定性计算，模型不参与，见 src/research_check.py）
     s_research = "SKIPPED"
+    rc = None
     if claim_matches:
         rc = run_research_check(claims_path, claim_matches, records, run_id)
         s_research = "PASS={}/FAIL={}/REVIEW={}".format(
             sum(1 for r in rc["results"] if r["status"] == "PASS"),
             sum(1 for r in rc["results"] if r["status"] == "FAIL"),
             len(rc["review"]))
-    # 3. 规则核查（数字经济B 的接口，未交付时降级跳过）
-    run_rules_engine(records, run_id, offline)
+    # 3. 规则核查（C内/C间/C期/C附，见 src/rules_engine.py）
+    rr = run_rules_engine(records, run_id, offline)
+
+    # 4. 异常原因解释：模型在程序给出的候选原因中做选择，程序校验其合规性
+    s_explain = "SKIPPED"
+    rule_res = (rr or {}).get("results") or []
+    rc_res = (rc or {}).get("results") or []
+    if rule_res or rc_res:
+        from src.explain import explain_anomalies
+        explained = explain_anomalies(rule_res, run_id, offline,
+                                      research_results=rc_res)
+        # 解释是后补的：规则侧要重新落盘；研报侧 rc 已就地更新，需一并写回
+        if rule_res:
+            prev = json.loads((ROOT / "runs" / run_id / "rules" / "results.json")
+                              .read_text(encoding="utf-8"))
+            prev["results"] = explained
+            _write_json(run_id, "rules/results.json", prev)
+        if rc_res:
+            _write_json(run_id, "rules/research_claims.json", rc)
+        done = [r for r in list(explained) + list(rc_res) if r.get("explanation")]
+        s_explain = f"{len(done)} 条" if done else "无异常可解释"
 
     manifest["outputs"].update({"match_item_status": s_item,
                                 "match_claim_status": s_claim,
-                                "research_check": s_research})
+                                "research_check": s_research,
+                                "explain": s_explain})
     save_manifest(run_id, manifest)
     return {"run_id": run_id, "match_item": s_item, "match_claim": s_claim,
-            "research_check": s_research}
+            "research_check": s_research, "explain": s_explain}

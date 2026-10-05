@@ -63,6 +63,15 @@ def print_summary(run_id: str) -> None:
         detail = "  ".join(f"{k}={v}" for k, v in sorted(got.items()))
         print(f"  规则核查     {len(rules.get('results', []))} 条  {detail}")
 
+    exp = _read(base / "rules" / "explanations.json")
+    if exp is not None:
+        disagree = [i for i in exp.get("items", [])
+                    if (i.get("explanation") or {}).get("agrees_with_program") is False]
+        line = f"  异常解释     {exp.get('explained', 0)} 条  {exp.get('status', '')}"
+        if disagree:
+            line += f"  ⚠ 其中 {len(disagree)} 条与程序归因不一致"
+        print(line)
+
     csi = _read(base / "rules" / "csi.json")
     if csi is not None and csi.get("csi") is not None:
         print(f"  一致性指数   CSI={csi['csi']}  等级 {csi['grade']}（{csi.get('grade_label', '')}）")

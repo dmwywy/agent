@@ -596,3 +596,81 @@ def test_csi_includes_research_dimension():
     assert dims["C研"]["rules_applicable"] == 2, "C研 结果未并入 CSI"
     assert dims["C研"]["score"] == 0.5
     assert out["csi"]["csi"] < 100, "研报有 FAIL 时 CSI 不应满分"
+
+
+# ---------- I：异常原因解释 ----------
+
+def _fake_explain(monkeypatch, cause="UNIT_SCALE", text="单位表述不规范", conf=0.9):
+    from src import explain
+    seen = []
+
+    def fake(task, payload, run_id, **kw):
+        seen.append((task, payload))
+        return ({"ok": True, "cause": cause, "explanation": text, "confidence": conf,
+                 "evidence": {"chunk_id": payload["chunk_id"], "quote": ""}}, "API_OK")
+
+    monkeypatch.setattr(explain, "call_task", fake)
+    return explain, seen
+
+
+def test_explain_only_for_fail_and_review(monkeypatch):
+    """只解释 FAIL / REVIEW；PASS 与 NA 不调用模型（省钱且无意义）。"""
+    explain, seen = _fake_explain(monkeypatch)
+    results = [
+        {"rule_id": "A", "status": "PASS", "evidence": {"chunk_id": "t1", "raw_text": "x"}},
+        {"rule_id": "B", "status": "NA", "evidence": {"chunk_id": "t2", "raw_text": "x"}},
+        {"rule_id": "C", "status": "FAIL", "diff": "2000.00", "tolerance": "100.00",
+         "evidence": {"chunk_id": "t3", "raw_text": "资产总计 …"}},
+    ]
+    explain.explain_anomalies(results, "pytest_explain")
+    assert len(seen) == 1 and seen[0][1]["rule_id"] == "C"
+
+
+def test_explain_rejects_numbers_in_explanation(monkeypatch):
+    """模型解释里出现数字即丢弃——prompt 已禁止，程序侧必须兜底。"""
+    explain, _ = _fake_explain(monkeypatch, text="差额约为财报值的10倍")
+    results = [{"rule_id": "C", "status": "FAIL", "diff": "2000", "tolerance": "100",
+                "evidence": {"chunk_id": "t3", "raw_text": "x"}}]
+    explain.explain_anomalies(results, "pytest_explain2")
+    e = results[0]["explanation"]
+    assert e["text"] == "" and "含数字" in e["note"]
+
+
+def test_explain_flags_disagreement_with_program():
+    """模型判断与程序确定性归因不一致时必须标出，不得静默采信。"""
+    from src import explain
+    import src.explain as E
+
+    class FakeCall:
+        @staticmethod
+        def call_task(task, payload, run_id, **kw):
+            return ({"ok": True, "cause": "VALUE_ERROR", "explanation": "疑为数值引用错误",
+                     "confidence": 0.8,
+                     "evidence": {"chunk_id": payload["chunk_id"], "quote": ""}}, "API_OK")
+
+    orig = E.call_task
+    E.call_task = FakeCall.call_task
+    try:
+        results = [{"rule_id": "RC01", "status": "FAIL", "cause": "UNIT_SCALE",
+                    "diff": "1", "tolerance": "10", "claim_id": "c1",
+                    "evidence": {"sentence": "归母净利润 862.3 亿万元"}}]
+        explain.explain_anomalies([], "pytest_explain3", research_results=results)
+        e = results[0]["explanation"]
+        assert e["program_cause"] == "UNIT_SCALE"
+        assert e["cause"] == "VALUE_ERROR"
+        assert e["agrees_with_program"] is False
+    finally:
+        E.call_task = orig
+
+
+def test_diff_desc_is_neutral_for_bad_unit():
+    """畸形单位时的差异描述：既不把模型引向"数值差异"，也不直接泄露结论。
+
+    正例："差异不在数值大小上" —— 告诉模型别盯着数字，但不点名是单位问题；
+    模型要自己从证据原文（含"亿万元"）推出 UNIT_SCALE。
+    """
+    from src.explain import _diff_desc
+    d = _diff_desc({"reason": "单位写法非法：亿万元", "diff": "1", "tolerance": "10"})
+    assert "略超容差" not in d, "不得暗示这是数值大小问题"
+    assert "数值" in d, "应明确说明差异不在数值上"
+    assert "UNIT_SCALE" not in d and "单位写法非法" not in d, "不得直接把答案写进描述"
