@@ -1,0 +1,279 @@
+# src/pipeline.py
+"""流程编排：把「解析数据 → 语义提取 → 规则核查 → 量化评分 → 报告」串成可运行闭环。
+
+对接边界（务必与 docs/interfaces.md 保持一致）：
+  - 数字经济A  产出 data/structured/<公司>_<期间>.json（§2.1，含证据三要素 page/chunk_id/raw_text）
+  - 信息工程    本模块调度模型侧任务，产出 runs/<run_id>/llm/*（§3.1 / §3.2）
+  - 数字经济B  实现 src.rules_engine（金额计算 + 表内勾稽 + 表间比对 + CSI 评分，§4）
+
+B 交付 rules_engine 前，本模块用 import 守卫：存在则调用，不存在则写占位文件并跳过，
+保证模型侧可独立跑通、可离线复现。
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import yaml
+
+from src.inputs import build_match_claim, build_match_item
+from src.research_check import run_research_check
+from src.tasks import call_task, load_prompt
+from src.manifest import new_manifest, save_manifest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_config(path: str) -> dict:
+    with (ROOT / path).open(encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def load_structured(data_dir: str) -> list[dict]:
+    """加载 A 的解析结果目录下所有 .json，拍平成一个字段记录数组。"""
+    d = ROOT / data_dir
+    if not d.exists():
+        raise FileNotFoundError(
+            f"解析数据目录不存在：{d}。请数字经济A 先产出结构化数据"
+            f"（格式见 docs/interfaces.md §2.1，缺 page/chunk_id/raw_text 不得进入核查）。")
+    records = []
+    for p in sorted(d.glob("*.json")):
+        if p.name == "chunk_index.json":
+            continue        # 配套的 chunk_id → 页码映射表，不是字段记录（§2.3）
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            continue        # 非字段记录数组一律跳过，避免污染后续流程
+        records.extend(payload)
+    return records
+
+
+def _standard_items() -> list[dict]:
+    """标准科目清单（code + 中文名），供 match_item 提示词使用。"""
+    with (ROOT / "rules" / "fields.yaml").open(encoding="utf-8") as f:
+        fields = yaml.safe_load(f)["fields"]
+    return [{"code": c, "name": m.get("zh", c)} for c, m in fields.items()]
+
+
+def _chunk_map(records: list[dict]) -> dict[str, str]:
+    """chunk_id -> raw_text，供证据真实性校验使用（模型只能引用见过的 chunk）。"""
+    return {r["chunk_id"]: r.get("raw_text", "") for r in records if r.get("chunk_id")}
+
+
+def _write_json(run_id: str, rel: str, obj) -> Path:
+    p = ROOT / "runs" / run_id / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True),
+                 encoding="utf-8")
+    return p
+
+
+def _attach_evidence(items: list[dict], records: list[dict]) -> list[dict]:
+    """程序回填证据：模型只给语义映射，科目的来源位置由解析记录确定性回填并校验。
+
+    依据 interfaces.md §5.3 禁则3「模型不生成页码」——位置是客观事实，由程序产出；
+    模型复述 chunk_id 没有信息增益，反而多一条"抄错就误杀正确映射"的路径。
+    每个来源都做包含性校验：科目名必须真实出现在该片段的 raw_text 中。
+    """
+    by_raw: dict[str, list[dict]] = {}
+    for r in records:
+        if r.get("item_raw"):
+            by_raw.setdefault(r["item_raw"], []).append(r)
+
+    enriched = []
+    for m in items:
+        raw = m.get("raw_header", "")
+        sources = []
+        for r in by_raw.get(raw, []):
+            chunk = r.get("raw_text", "")
+            sources.append({
+                "page": r.get("page"),
+                "chunk_id": r.get("chunk_id"),
+                "raw_text": chunk,
+                "scope": r.get("scope"),
+                "period": r.get("period"),
+                # 证据校验：原文片段必须真实存在，否则不得用于报告
+                "verified": bool(raw) and raw in chunk,
+            })
+        enriched.append({
+            **m,
+            "evidence": {
+                "sources": sources,
+                "verified": bool(sources) and all(s["verified"] for s in sources),
+            },
+        })
+    return enriched
+
+
+def run_match_item(records: list[dict], run_id: str, offline: bool):
+    """科目归一化：把 A 的原始科目名映射到标准科目编号（模型侧第一步，始终可跑）。
+    模型返回映射 → 程序回填来源证据 → 落盘 llm/mappings.json。"""
+    headers = sorted({r["item_raw"] for r in records if r.get("item_raw")})
+    if not headers:
+        return None, "NO_HEADERS"
+    payload = build_match_item(headers, _standard_items())
+    out, status = call_task("match_item", payload, run_id, offline=offline)
+
+    mappings = _attach_evidence(out["items"] if out else [], records)
+    unverified = [m["raw_header"] for m in mappings
+                  if m["evidence"]["sources"] and not m["evidence"]["verified"]]
+    _write_json(run_id, "llm/mappings.json",
+                {"run_id": run_id, "status": status,
+                 "headers_sent": len(headers),
+                 "mappings": mappings,
+                 # 无来源/校验未过 → 不能进报告，只能进人工复核清单
+                 "review": [{"item_raw": h, "reason": "无解析记录或原文片段校验未通过"}
+                            for h in unverified]})
+    return out, status
+
+
+def _claim_fields(records: list[dict]) -> list[dict]:
+    """可得指标清单：**只给科目与期间，不给金额**（interfaces.md §5.1 关键约束）。
+    给了金额，模型就可能顺手判对错，越界到规则侧的职责。"""
+    seen, out = set(), []
+    for r in records:
+        key = (r["item_code"], r["period"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"item_code": r["item_code"], "period": r["period"]})
+    return sorted(out, key=lambda x: (x["item_code"], x["period"]))
+
+
+def _attach_claim_evidence(matches: list[dict], claim_by_id: dict) -> list[dict]:
+    """程序回填引用位置：研报文件名 + 章节 + 原句，全部来自程序自己的输入。
+    与 §3.1a 同理——位置是客观事实，模型复述它没有信息增益。"""
+    out = []
+    for m in matches:
+        c = claim_by_id.get(m.get("claim_id"))
+        out.append({
+            **m,
+            "evidence": {
+                "file": c["source"] if c else None,
+                "section": c["section"] if c else None,
+                "sentence": c["sentence"] if c else None,
+                # 模型返回了不存在的 claim_id → 证据无效，不得进入核查
+                "verified": c is not None,
+            },
+        })
+    return out
+
+
+CLAIM_BATCH = 20     # 起始批大小；失败时二分递减（见 _match_claim_batched）
+
+
+def _match_claim_batched(claims: list[dict], fields: list[dict],
+                         run_id: str, offline: bool) -> tuple[list[dict], list[str]]:
+    """分批调用 match_claim，并对"输出被截断"做自适应二分。
+
+    deepseek-flash 默认开启深度思考，reasoning 与正文共享 max_tokens；若某批的
+    推理量把预算烧光，正文会返回空串（OUTPUT_EMPTY，见 src/llm.py 的 THINKING）。
+    已在调用层关闭思考，正常批次开销很小；此处保留二分作为兜底——推理量并非完全
+    确定，拆半能把"整批丢失"降级为"个别条目进人工复核"。
+    """
+    out, status = call_task(
+        "match_claim",
+        build_match_claim([{"claim_id": c["claim_id"], "sentence": c["sentence"]}
+                           for c in claims], fields),
+        run_id, offline=offline)
+    # 只有"输出被截断"才值得拆小重试。缓存未命中、凭据错误这类失败，
+    # 拆得再小也不会变好——不判断就会在离线模式下裂变成指数级调用。
+    if out or len(claims) == 1 or "OUTPUT_EMPTY" not in status:
+        return (out["matches"] if out else []), [status]
+
+    mid = len(claims) // 2
+    m1, s1 = _match_claim_batched(claims[:mid], fields, run_id, offline)
+    m2, s2 = _match_claim_batched(claims[mid:], fields, run_id, offline)
+    return m1 + m2, s1 + s2
+
+
+def run_match_claim(claims_path: str, records: list[dict], run_id: str, offline: bool):
+    """研报引用匹配：claim 句子 → (item_code, period)。数值比较交给规则侧（C研 维度）。"""
+    p = ROOT / claims_path
+    if not p.exists():
+        return None, "NO_CLAIMS"
+    all_claims = json.loads(p.read_text(encoding="utf-8"))
+    if not all_claims:
+        return None, "NO_CLAIMS"
+
+    fields = _claim_fields(records)
+    matches, flat_status = [], []
+    for i in range(0, len(all_claims), CLAIM_BATCH):
+        m, s = _match_claim_batched(all_claims[i:i + CLAIM_BATCH], fields, run_id, offline)
+        matches.extend(m)
+        flat_status.extend(s)
+    claims = all_claims
+
+    claim_by_id = {c["claim_id"]: c for c in claims}
+    enriched = _attach_claim_evidence(matches, claim_by_id)
+    matched_ids = {m["claim_id"] for m in matches}
+    _write_json(run_id, "llm/claim_matches.json", {
+        "run_id": run_id,
+        "status": "|".join(dict.fromkeys(flat_status)),
+        "claims_sent": len(claims),
+        "fields_offered": len(fields),
+        "matches": enriched,
+        # 模型漏答的 claim：不猜测，一律进人工复核
+        "review": [{"claim_id": c["claim_id"], "reason": "模型未返回该条的匹配结果",
+                    "sentence": c["sentence"]}
+                   for c in claims if c["claim_id"] not in matched_ids],
+    })
+    return enriched, "|".join(dict.fromkeys(flat_status))
+
+
+def run_rules_engine(records: list[dict], run_id: str, offline: bool):
+    """规则侧钩子：数字经济B 交付 src.rules_engine 后在此接入。
+
+    约定函数签名：run_rules(records, run_id, offline) -> dict
+      返回 {"results": [...], "csi": {...}}，字段见 interfaces.md §4。
+    B 未交付时返回 None 并写占位文件，不阻断模型侧流程。
+    """
+    try:
+        from src.rules_engine import run_rules
+    except ImportError:
+        _write_json(run_id, "rules/placeholder.json",
+                    {"note": "src.rules_engine 未就绪（数字经济B 待交付）；本轮跳过规则核查",
+                     "results": [], "csi": None})
+        return None
+    return run_rules(records, run_id, offline)
+
+
+def run(config_path: str, offline: bool = False, run_id: str = "demo") -> dict:
+    """入口：加载配置 → 解析数据 → 语义提取 → 规则核查（钩子）→ 落盘清单。"""
+    cfg = load_config(config_path)
+    data_dir = cfg.get("paths", {}).get("structured", "data/structured")
+    materials = cfg.get("run", {}).get("materials", {})
+    claims_path = materials.get("report_claims", "")
+    operator = cfg.get("run", {}).get("user", "team")
+
+    records = load_structured(data_dir)
+
+    # 运行清单：只记元信息，不记密钥、不记财报正文
+    _, meta_item = load_prompt("match_item")
+    _, meta_claim = load_prompt("match_claim")
+    manifest = new_manifest(run_id, operator,
+                            model_cfg={"provider": "deepseek",
+                                       "model_id": "deepseek-flash"},
+                            prompts=[meta_item, meta_claim], input_files=[])
+
+    # 1. 科目归一化（财报原文科目名 → 标准科目编号）
+    _, s_item = run_match_item(records, run_id, offline)
+    # 2. 研报引用匹配（claim 句子 → 科目+期间）：模型只答"在说哪个指标"
+    claim_matches, s_claim = (run_match_claim(claims_path, records, run_id, offline)
+                              if claims_path else (None, "NOT_CONFIGURED"))
+    # 2b. C研 维度数值比对（确定性计算，模型不参与，见 src/research_check.py）
+    s_research = "SKIPPED"
+    if claim_matches:
+        rc = run_research_check(claims_path, claim_matches, records, run_id)
+        s_research = "PASS={}/FAIL={}/REVIEW={}".format(
+            sum(1 for r in rc["results"] if r["status"] == "PASS"),
+            sum(1 for r in rc["results"] if r["status"] == "FAIL"),
+            len(rc["review"]))
+    # 3. 规则核查（数字经济B 的接口，未交付时降级跳过）
+    run_rules_engine(records, run_id, offline)
+
+    manifest["outputs"].update({"match_item_status": s_item,
+                                "match_claim_status": s_claim,
+                                "research_check": s_research})
+    save_manifest(run_id, manifest)
+    return {"run_id": run_id, "match_item": s_item, "match_claim": s_claim,
+            "research_check": s_research}

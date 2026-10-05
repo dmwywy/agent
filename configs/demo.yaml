@@ -1,10 +1,11 @@
 # configs/demo.yaml —— 初赛最小验证范围
 run:
-  company: 待定（李思婕 9/28 确认）
+  company: 贵州茅台
   materials:
     annual_2024: data/full/annual_2024.pdf
     annual_2025: data/full/annual_2025.pdf
-    report_draft: data/demo/report_draft.md
+    # 研报 claim 文件（由 tools/extract_claims.py 从模拟研报生成）
+    report_claims: data/demo/研报claims_2024.json
   user: member_e
   offline: false
 paths:
