@@ -567,3 +567,32 @@ def test_web_app_handles_run_without_report():
     at.sidebar.selectbox[0].set_value("pytest_web_noreport").run()
     assert not at.exception, [str(e.value) for e in at.exception]
     assert any("report" in str(i.value) for i in at.info)
+
+
+def test_csi_includes_research_dimension():
+    """C研 结果必须并入 CSI——《项目思路》公式里 C研 占 0.20 权重。
+
+    此前 C研 的 FAIL 不进 CSI，会出现"查出 2 条研报错误、CSI 却仍是满分"的虚高。
+    """
+    from src.pipeline import ROOT
+    from src.rules_engine import run_rules
+
+    base = ROOT / "runs" / "pytest_csi_research" / "rules"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "research_claims.json").write_text(json.dumps({"results": [
+        {"dimension": "C研", "status": "PASS"}, {"dimension": "C研", "status": "FAIL"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+
+    out = run_rules([
+        {"item_code": "TOTAL_ASSETS", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "1000.00", "unit_raw": "元", "raw_text": "资产总计 1000.00"},
+        {"item_code": "TOTAL_LIAB", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "400.00", "unit_raw": "元", "raw_text": "负债合计 400.00"},
+        {"item_code": "TOTAL_EQUITY", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "600.00", "unit_raw": "元", "raw_text": "所有者权益合计 600.00"},
+    ], "pytest_csi_research")
+
+    dims = out["csi"]["dimensions"]
+    assert dims["C研"]["rules_applicable"] == 2, "C研 结果未并入 CSI"
+    assert dims["C研"]["score"] == 0.5
+    assert out["csi"]["csi"] < 100, "研报有 FAIL 时 CSI 不应满分"

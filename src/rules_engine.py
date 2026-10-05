@@ -98,6 +98,13 @@ def _cross_period_pairs(records: list[dict]) -> dict[str, list[str]]:
     return out
 
 
+def _read_json(p: Path, default=None):
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
 def _evidence(rec: dict) -> dict:
     loc = {"file": None, "raw_text": rec.get("raw_text", "")}
     if rec.get("page") is not None:
@@ -204,7 +211,12 @@ def run_rules(records: list[dict], run_id: str, offline: bool = False) -> dict:
                 "evidence": _evidence(ref),
             })
 
-    csi = compute_csi(results, rules_cfg)
+    # ★ C研 的结果由 src/research_check.py 产出（存在单独的 research_claims.json），
+    #   必须并入 CSI 计算——《项目思路》的公式里 C研 占 0.20 权重，
+    #   不并进来就会出现"有 2 条 FAIL 却显示 C研 不适用"的矛盾。
+    research_results = (_read_json(ROOT / "runs" / run_id / "rules" / "research_claims.json")
+                        or {}).get("results", [])
+    csi = compute_csi(results + research_results, rules_cfg)
     out_dir = ROOT / "runs" / run_id / "rules"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "results.json").write_text(
