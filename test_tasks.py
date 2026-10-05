@@ -46,9 +46,26 @@ def test_prompt_files_naming():
 
 
 def test_netguard_installed():
-    from src.netguard import install_allowlist, ALLOW_HOST
-    install_allowlist(run_id="pytest")
+    """白名单只拦对外地址，且**本机回环必须放行**——否则网页界面直接不可用。"""
+    from src.netguard import (ALLOW_HOST, install_allowlist, is_allowed,
+                              uninstall_allowlist)
     assert ALLOW_HOST == "api.deepseek.com"
+    assert is_allowed("api.deepseek.com", 443)
+    assert is_allowed("127.0.0.1", 8899)          # Streamlit 本地服务
+    assert is_allowed("localhost", 80)
+    assert not is_allowed("evil.example.com", 443)
+    assert not is_allowed("api.deepseek.com", 80)  # 端口也要对
+
+    install_allowlist(run_id="pytest")
+    try:
+        import socket
+        socket.socket().connect(("127.0.0.1", 9))   # 回环放行（连不上是另一回事）
+    except PermissionError:
+        raise AssertionError("netguard 拦截了本机回环，会搞垮网页界面")
+    except OSError:
+        pass                                        # 连接被拒/超时都正常
+    finally:
+        uninstall_allowlist()                       # 必须还原，否则污染后续测试
 
 
 def test_post_checks_enum_whitelist():
@@ -517,3 +534,36 @@ def test_na_dimensions_get_zero_normalized_weight():
     for na in ("C间", "C附", "C研"):
         assert r["weights_normalized"][na] == 0.0, na
     assert abs(sum(r["weights_normalized"].values()) - 1.0) < 1e-6
+
+
+# ---------- H：网页入口 ----------
+
+def test_web_app_renders_without_exception():
+    """网页入口必须能渲染且不抛异常（用 Streamlit 官方测试框架真跑一遍）。"""
+    from streamlit.testing.v1 import AppTest
+    from src.pipeline import ROOT
+
+    _make_run_fixture("pytest_web")
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=90).run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert [t.value for t in at.title] == ["财报一致性量化核查智能体"]
+
+    labels = [m.label for m in at.metric]
+    assert "CSI" in labels and "提取字段" in labels
+    assert len(at.tabs) == 5
+
+    # 切到有报告产物的运行，应出现下载按钮
+    at.sidebar.selectbox[0].set_value("pytest_web").run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+
+
+def test_web_app_handles_run_without_report():
+    """没有报告产物的运行不得报错，而应提示如何去生成。"""
+    from streamlit.testing.v1 import AppTest
+    from src.pipeline import ROOT
+
+    _make_run_fixture("pytest_web_noreport")
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=90).run()
+    at.sidebar.selectbox[0].set_value("pytest_web_noreport").run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert any("report" in str(i.value) for i in at.info)

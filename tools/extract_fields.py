@@ -70,6 +70,19 @@ LABEL_ALIASES = {
     "期末现金及现金等价物余额": ("CASH_EQ_END", "CF", "BAL_END"),
 }
 
+# ---- 附注明细（C附 维度）----
+# 结构："七、合并财务报表项目注释" 下的 "1、 货币资金" 小节，后跟一张
+# 【项目 | 期末余额 | 期初余额】表。用于把主表的汇总数拆到明细科目上，
+# 从而核对"主表货币资金 = 库存现金 + 银行存款 + 其他货币资金"。
+NOTE_TARGETS = {
+    "货币资金": {"库存现金": "CASH_ON_HAND", "银行存款": "CASH_IN_BANK",
+                 "其他货币资金": "CASH_OTHER"},
+}
+# 附注小节标题形如 "1、 货币资金√适用"（后面可能粘着适用性标记）。
+# ★ 编号分隔符必须同时接受全角顿号与半角句点：实测 2024 年报用 "1、货币资金"，
+#   2025 年报用 "8. 货币资金"——同一家公司不同年份写法就不一样，只认一种会漏。
+NOTE_HEADING_RE = re.compile(r"^\d+\s*[、.．]\s*([一-龥]{2,10})")
+
 # 科目名正则：非数字开头，可含括号冒号汉字，后接可选附注号与两个金额
 ROW_RE = re.compile(
     r"^(?P<label>[^\d\s][^\d]*?)\s+(?:(?P<note>\d{1,2})\s+)?"
@@ -195,6 +208,7 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
     chunk_index: dict[str, dict] = {}
     seen: set[tuple[str, str]] = set()
     state: str | None = None
+    note: str | None = None          # 当前所在附注小节（如"货币资金"）
     heading = ""
     table_no = 0
 
@@ -202,6 +216,34 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
         frag = m.group(0)
         if frag.startswith("<w:tbl>"):
             table_no += 1
+            # 附注明细表：按"项目 | 期末 | 期初"取目标明细科目
+            if note in NOTE_TARGETS:
+                for ri, cells in enumerate(_docx_rows(frag)):
+                    code = NOTE_TARGETS[note].get(cells[0].strip())
+                    if not code:
+                        continue
+                    vals = [c for c in cells[1:] if _CELL_VALUE_RE.match(c.strip())]
+                    if not vals:
+                        continue
+                    locator = f"{note}（附注） / 表#{table_no} / 第{ri + 1}行"
+                    chunk_id = f"n{table_no:03d}_r{ri + 1:02d}"
+                    chunk_index.setdefault(chunk_id, {
+                        "locator": locator, "source": src_path.name,
+                        "chars": len(" ".join(cells))})
+                    for value, period in zip(vals, (year, year - 1)):
+                        if (code, str(period)) in seen:
+                            continue
+                        seen.add((code, str(period)))
+                        records.append({
+                            "item_code": code, "item_raw": cells[0].strip(),
+                            "value": value.replace(",", ""), "unit_raw": "元",
+                            "period_type": "BAL_END" if period == year else "BAL_BEG",
+                            "period": f"{period}-12-31", "scope": "CONSOLIDATED",
+                            "statement": "NOTE", "locator": locator,
+                            "chunk_id": chunk_id, "raw_text": " | ".join(cells),
+                            "source_hash": src_hash, "parse_status": "OK",
+                            "confidence": 1.0,
+                        })
             if state is None:
                 continue
             for ri, cells in enumerate(_docx_rows(frag)):
@@ -246,14 +288,20 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
             text = _strip_tags(frag)
             if text in CONSOLIDATED_TITLES:
                 state = CONSOLIDATED_TITLES[text]
+                note = None
                 heading = text        # 进入主表：章节名用表标题
             elif text in CONTEXT_BREAKERS:
                 state = None          # 遇母公司报表/其他主表即切断，不混口径
+                note = None
                 heading = text
-            elif text and state is None:
-                # 只在表**外**更新标题。表内若也更新，locator 会被
-                # "单位：元 币种：人民币"这类紧跟标题的行覆盖掉。
-                heading = text
+            else:
+                nm = NOTE_HEADING_RE.match(text)
+                if nm:
+                    note = nm.group(1)        # 进入某个附注小节
+                if text and state is None:
+                    # 只在表**外**更新标题。表内若也更新，locator 会被
+                    # "单位：元 币种：人民币"这类紧跟标题的行覆盖掉。
+                    heading = text
     return records, chunk_index
 
 
