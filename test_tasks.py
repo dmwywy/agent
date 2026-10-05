@@ -674,3 +674,65 @@ def test_diff_desc_is_neutral_for_bad_unit():
     assert "略超容差" not in d, "不得暗示这是数值大小问题"
     assert "数值" in d, "应明确说明差异不在数值上"
     assert "UNIT_SCALE" not in d and "单位写法非法" not in d, "不得直接把答案写进描述"
+
+
+# ---------- J：标准答案与准确率 / 可复现性 ----------
+
+def test_accuracy_compare_counts_correct_wrong_missing():
+    """准确率 = 正确 ÷ 应提取；缺失与错误分别计数，不混为一谈。"""
+    from tools.check_accuracy import compare
+    gold = {"entries": [
+        {"item_code": "A", "item_raw": "甲", "period": "2024", "value": "100.00",
+         "basis": "双源一致"},
+        {"item_code": "B", "item_raw": "乙", "period": "2024", "value": "200.00",
+         "basis": "仅PDF"},
+        {"item_code": "C", "item_raw": "丙", "period": "2024", "value": "300.00",
+         "basis": "仅PDF"},
+    ]}
+    records = [
+        {"item_code": "A", "period": "2024", "value": "100.00"},   # 正确
+        {"item_code": "B", "period": "2024", "value": "999.00"},   # 错误
+        # C 缺失
+    ]
+    r = compare(gold, records)
+    assert r["total"] == 3 and r["correct"] == 1
+    assert r["wrong"] == 1 and r["missing"] == 1
+    assert r["E"] == round(1 / 3 * 100, 2)
+
+
+def test_accuracy_matches_any_duplicate_value():
+    """同一 (科目,期间) 有多条记录时，任一条对上即算正确。"""
+    from tools.check_accuracy import compare
+    gold = {"entries": [{"item_code": "A", "item_raw": "甲", "period": "2024",
+                         "value": "100.00", "basis": "仅PDF"}]}
+    records = [{"item_code": "A", "period": "2024", "value": "0"},
+               {"item_code": "A", "period": "2024", "value": "100.00"}]
+    assert compare(gold, records)["E"] == 100.0
+
+
+def test_gold_standard_exists_and_is_dual_sourced():
+    """标准答案必须存在，且含双来源交叉确认的条目（否则不独立）。"""
+    from src.pipeline import ROOT
+    p = ROOT / "data" / "gold_standard" / "贵州茅台_2024_核心字段.json"
+    if not p.exists():
+        return
+    d = json.loads(p.read_text(encoding="utf-8"))
+    assert d["entries"], "标准答案为空"
+    assert not d.get("mismatches"), "标准答案两个来源存在冲突，须人工裁定"
+    dual = [e for e in d["entries"] if e["basis"].startswith("双源")]
+    assert dual, "没有任何双来源交叉确认的条目，独立性问题"
+    for e in d["entries"]:
+        assert e["evidence"].get("page") is not None, f"{e['item_code']} 缺证据页码"
+
+
+def test_reproducible_digest_ignores_run_id():
+    """可复现性比对必须剔除 run_id——它是运行标识，本就该不同。"""
+    import tempfile
+    from pathlib import Path as _P
+    from tools.check_reproducible import _digest
+    d = _P(tempfile.mkdtemp())
+    (d / "a.json").write_text('{"run_id":"X","v":[1,2]}', encoding="utf-8")
+    (d / "b.json").write_text('{"run_id":"Y","v":[1,2]}', encoding="utf-8")
+    (d / "c.json").write_text('{"run_id":"X","v":[1,3]}', encoding="utf-8")
+    assert _digest(d / "a.json") == _digest(d / "b.json")
+    assert _digest(d / "a.json") != _digest(d / "c.json")

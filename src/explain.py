@@ -52,6 +52,25 @@ def _diff_desc(r: dict) -> str:
     return "差额与容差相差数个量级"
 
 
+def load_explanations(run_id: str) -> dict[str, dict]:
+    """读回 explanations.json，按编号索引，供报告/网页与结果文件关联展示。
+
+    结果文件里**不含**模型解释（那是可复现性要求）；解释单独存放，
+    展示时用 rule_id / claim_id 关联。
+    """
+    p = ROOT / "runs" / run_id / "rules" / "explanations.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out = {}
+    for it in data.get("items", []):
+        key = it.get("claim_id") or it.get("rule_id")
+        if key:
+            out[key] = it.get("explanation") or {}
+    return out
+
+
 def _rule_locator(r: dict) -> tuple[str, str]:
     """规则结果：证据是 chunk_id + raw_text。"""
     ev = r.get("evidence") or {}

@@ -290,18 +290,14 @@ def run(config_path: str, offline: bool = False, run_id: str = "demo",
     rc_res = (rc or {}).get("results") or []
     if rule_res or rc_res:
         from src.explain import explain_anomalies
-        explained = explain_anomalies(rule_res, run_id, offline,
-                                      research_results=rc_res)
-        # 解释是后补的：规则侧要重新落盘；研报侧 rc 已就地更新，需一并写回
-        if rule_res:
-            prev = json.loads((ROOT / "runs" / run_id / "rules" / "results.json")
-                              .read_text(encoding="utf-8"))
-            prev["results"] = explained
-            _write_json(run_id, "rules/results.json", prev)
-        if rc_res:
-            _write_json(run_id, "rules/research_claims.json", rc)
-        done = [r for r in list(explained) + list(rc_res) if r.get("explanation")]
-        s_explain = f"{len(done)} 条" if done else "无异常可解释"
+        # ★ 只写 explanations.json，**不回写 results.json / research_claims.json**。
+        #   模型措辞与置信度在多次真实调用间会浮动（实测同一输入 confidence 0.80/0.85），
+        #   混进结果文件会让"结果可机器比对、逐字节复现"失效。
+        #   结果文件保持纯确定性；模型输出单独存放，由报告/网页按编号关联展示。
+        explain_anomalies(rule_res, run_id, offline, research_results=rc_res)
+        exp = json.loads((ROOT / "runs" / run_id / "rules" / "explanations.json")
+                         .read_text(encoding="utf-8"))
+        s_explain = f"{exp.get('explained', 0)} 条"
 
     manifest["outputs"].update({"match_item_status": s_item,
                                 "match_claim_status": s_claim,

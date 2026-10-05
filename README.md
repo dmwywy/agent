@@ -241,7 +241,33 @@ macOS / Linux：
 界面**只读** `runs/<run_id>/` 下的产物，不重跑流程、不调模型——展示与计算分离，
 看到的永远是已落盘、可复核的结果。
 
-### 10. 离线 mock 联调（无需 API Key）
+### 10. 质量核算（提取准确率 / 可复现性）
+
+**结构化提取准确率 E** —— 分母取自人工标准答案，**不是**系统自己的输出：
+
+    python tools/build_gold_standard.py --year 2024 --pdf <年报.pdf>     # 生成标准答案
+    python tools/check_accuracy.py --gold data/gold_standard/贵州茅台_2024_核心字段.json --run FINAL
+
+标准答案用**双独立来源交叉**：PDF 解析路径（与生产用的 docx 路径是两套不同代码）
++ 《一致性规则表》里金融侧独立做出的验算值。两者冲突则不写入，并提示人工裁定。
+每条都带证据（文件、页码、原文片段），可逐条回验。
+
+**结果可复现性** —— 比对两次运行的产物：
+
+    python tools/check_reproducible.py --a RUN1 --b RUN2
+    python tools/check_reproducible.py --a RUN1 --b RUN2 --strict-model   # 核验缓存重放
+
+产物分两类，核验标准不同：
+
+| 类别 | 产物 | 要求 |
+|---|---|---|
+| 确定性（纯程序计算） | `ingested/*`、`rules/results.json`、`rules/csi.json` | **必须逐字节一致** |
+| 模型相关 | `rules/research_claims.json`、`rules/explanations.json` | 真实调用间允许浮动；缓存重放须一致 |
+
+比对时剔除 `run_id`（它是运行标识，本就该不同）。**模型措辞不写进结果文件**——
+否则"结果可机器比对"就失效了；模型输出单独存放，展示时按编号关联。
+
+### 11. 离线 mock 联调（无需 API Key）
 
 给还没有密钥、或想先验证契约的成员用：
 
@@ -254,7 +280,7 @@ macOS / Linux：
 推理参数 + 输入数据」算出，改动其中任一项都会让 mock 失效（表现为
 `NO_CACHE_OFFLINE`），需重新生成。
 
-### 11. 汇总测试
+### 12. 汇总测试
 
     python -m pytest -q
 

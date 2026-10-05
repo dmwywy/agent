@@ -44,6 +44,18 @@ def collect(run_id: str) -> dict:
     mappings = _read(base / "llm" / "mappings.json", {}) or {}
 
     rule_results = results.get("results", [])
+    # 模型解释单独存放（结果文件保持纯确定性），此处按编号关联回来仅供展示
+    from src.explain import load_explanations
+    explanations = load_explanations(run_id)
+    for r in rule_results:
+        e = explanations.get(r.get("rule_id"))
+        if e:
+            r["explanation"] = e
+    for r in research.get("results", []):
+        e = explanations.get(r.get("claim_id"))
+        if e:
+            r["explanation"] = e
+
     anomalies = [r for r in rule_results if r.get("status") in ("FAIL", "REVIEW")]
     research_fail = [r for r in research.get("results", []) if r.get("status") == "FAIL"]
 

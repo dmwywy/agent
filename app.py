@@ -53,6 +53,13 @@ results = (_read(base / "rules" / "results.json", {}) or {}).get("results", [])
 csi = _read(base / "rules" / "csi.json", {}) or {}
 research = _read(base / "rules" / "research_claims.json", {}) or {}
 mappings = (_read(base / "llm" / "mappings.json", {}) or {}).get("mappings", [])
+# 模型解释单独存放（结果文件保持纯确定性），按编号关联回来展示
+_expl = {i.get("claim_id") or i.get("rule_id"): (i.get("explanation") or {})
+         for i in (_read(base / "rules" / "explanations.json", {}) or {}).get("items", [])}
+for _r in list(results) + list(research.get("results", [])):
+    _e = _expl.get(_r.get("claim_id") or _r.get("rule_id"))
+    if _e:
+        _r["explanation"] = _e
 
 fields = []
 for p in sorted((base / "ingested").glob("*.json")) if (base / "ingested").exists() \
@@ -95,6 +102,11 @@ with tab1:
                 c.metric("严重程度", r.get("severity") or "—")
                 if r.get("reason"):
                     st.write(f"**原因**：{r['reason']}")
+                ex = r.get("explanation") or {}
+                if ex.get("text"):
+                    flag = "" if ex.get("agrees_with_program", True) else " ⚠与程序归因不一致"
+                    st.write(f"**模型解释**（{ex.get('cause', '')}，置信度 {ex.get('confidence')}）{flag}："
+                             f"{ex['text']}")
                 st.write(f"**证据定位**：{ev.get('file') or '—'} · {loc}")
                 if ev.get("raw_text"):
                     st.code(ev["raw_text"], language=None)
