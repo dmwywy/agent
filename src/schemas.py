@@ -13,9 +13,13 @@ class ItemMap(BaseModel):
     confidence: float = Field(ge=0, le=1)
 
 class MatchItemOut(BaseModel):
-    ok: bool
+    """科目归一化：模型只做「原文科目名 → 标准科目编号」的语义映射。
+    本任务不含 evidence：科目在财报中的位置（page/chunk_id/raw_text）由程序
+    从数字经济A 的解析记录确定性回填，见 src/pipeline._attach_evidence。
+    依据 interfaces.md §5.3 禁则3「模型不生成页码」——让模型复述 chunk_id 无信息增益，
+    反而增加"抄错导致误杀正确映射"的路径。"""
+    ok: bool = True
     items: list[ItemMap] = []
-    evidence: Evidence
     reason: str = ""
 
 class UnitPeriodOut(BaseModel):
@@ -34,9 +38,13 @@ class ClaimMatch(BaseModel):
     reason: str = ""
 
 class MatchClaimOut(BaseModel):
-    ok: bool
+    """研报引用匹配：模型只判断「这句话在说哪个科目、哪个期间」，不判断数值对错。
+    本任务不含 evidence，理由与 match_item 同源：一批最多 40 条 claim，
+    单个 evidence 字段无法覆盖；且引用位置（研报文件名+章节+原句）本就是程序输入，
+    让模型复述没有信息增益。位置由 pipeline._attach_claim_evidence 确定性回填。
+    每条 claim 的语义依据由 ClaimMatch.reason 承载。"""
+    ok: bool = True
     matches: list[ClaimMatch] = []
-    evidence: Evidence
 
 class ExplainOut(BaseModel):
     ok: bool

@@ -11,10 +11,11 @@ def check_enum_whitelist(obj, allowed: dict) -> list[str]:
                 errs.append(f"canonical_item 越界：{it['canonical_item']}")
     if isinstance(obj, dict) and "matches" in obj:
         for m in obj["matches"]:
-            if m.get("item_code") not in allowed["item_codes"]:
+            # 空字符串 = 模型判"无法判断"，属合法，不判越界
+            if m.get("item_code") and m["item_code"] not in allowed["item_codes"]:
                 errs.append(f"item_code 越界：{m.get('item_code')}")
     if isinstance(obj, dict) and "cause" in obj:
-        if obj["cause"] not in allowed["causes"]:
+        if obj.get("cause") and obj["cause"] not in allowed["causes"]:
             errs.append(f"cause 越界：{obj['cause']}")
     return errs
 
@@ -30,6 +31,8 @@ def check_no_amounts(text: str, allowed_numbers: set[str]) -> list[str]:
 def check_evidence(ev: dict, chunks: dict[str, str]) -> tuple[bool, str]:
     """证据校验：chunk_id 必须在本次输入内，quote 必须真实存在于该片段"""
     cid, quote = ev.get("chunk_id"), ev.get("quote", "")
+    if not cid:
+        return False, "evidence.chunk_id 为空"
     if cid not in chunks:
         return False, f"chunk_id 不在本次输入中（疑似编造）：{cid}"
     if quote and quote not in chunks[cid]:

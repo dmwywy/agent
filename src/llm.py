@@ -13,7 +13,20 @@ load_dotenv(ROOT / ".env")
 
 BASE_URL = "https://api.deepseek.com"
 MODEL_ID = os.getenv("MODEL_ID", "deepseek-flash").strip()
-PARAMS = {"temperature": 0, "top_p": 1}        # ← 不要改这一行，否则缓存全部失效
+# ★ 推理参数必须全部写在这里：它们参与缓存键（model_plan.md §2.5）。
+#   若把 max_tokens 单独传给接口而不放进 PARAMS，改了这个值缓存却不会失效，
+#   会命中上一次的旧结果——"结果可复现"就失真了。
+#   deepseek-flash 是**推理模型**：reasoning_content 与正文共享 max_tokens 预算。
+#   改动此值会使既有缓存全部失效，需重跑 runs/demo_baseline/。
+PARAMS = {"temperature": 0, "top_p": 1, "max_tokens": 8000, "stream": False}
+
+# ★ 深度思考开关。deepseek-flash **默认开启思考**，推理 token 计入 completion_tokens
+#   并与正文共享 max_tokens。实测同一批 claim：
+#       thinking=enabled  → completion=8000（全部是 reasoning）、正文为空、finish_reason=length
+#       thinking=disabled → completion=242、正常返回 668 字符
+#   相差 33 倍。本项目的模型任务全是"带候选清单的受限分类/映射"（选科目、选期间、选原因），
+#   不需要长链推理，故显式关闭。此参数必须进缓存键（它改变输出）。
+THINKING = {"type": "disabled"}
 
 # ---- 模型白名单：写错在启动瞬间报错，不浪费一次请求 ----
 ALLOWED_MODELS = {"deepseek-flash", "deepseek-v4-pro"}
@@ -36,7 +49,8 @@ def _client() -> OpenAI:
 def cache_key(prompt_text: str, payload: dict) -> str:
     """缓存指纹：不含凭据、不含时间戳 → 换人换机器命中同一份缓存"""
     h = hashlib.sha256()
-    for p in (prompt_text, MODEL_ID, json.dumps(PARAMS, sort_keys=True),
+    eff_params = {**PARAMS, "thinking": THINKING}      # 全部推理参数参与指纹
+    for p in (prompt_text, MODEL_ID, json.dumps(eff_params, sort_keys=True),
               json.dumps(payload, sort_keys=True, ensure_ascii=False)):
         h.update(p.encode("utf-8"))
     return h.hexdigest()
@@ -66,13 +80,23 @@ def call(prompt_text: str, payload: dict, run_id: str = "default",
     for i in range(max_retry):
         try:
             r = client.chat.completions.create(
-                model=MODEL_ID, timeout=90, max_tokens=1500,
+                model=MODEL_ID, timeout=90,
                 response_format={"type": "json_object"},   # 强制 JSON 输出
                 messages=[{"role": "system", "content": prompt_text},
                           {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
-                extra_body={"user_id": user_id},
-                **PARAMS)
-            data = json.loads(r.choices[0].message.content)
+                # thinking 非 OpenAI 标准字段，须走 extra_body；它与 user_id 一起传给服务端
+                extra_body={"user_id": user_id, "thinking": THINKING},
+                **PARAMS)                                  # 含 max_tokens，与缓存键一致
+            content = r.choices[0].message.content
+            # 推理占满额度 → 正文为空。这是参数问题，重试同一输入不会有不同结果，
+            # 直接返回，避免白烧 3 次额度（每次都是满额 token）。
+            if not content:
+                log_event(run_id, "llm_call", task=task, model=MODEL_ID,
+                          status="OUTPUT_EMPTY",
+                          finish_reason=r.choices[0].finish_reason,
+                          completion_tokens=getattr(r.usage, "completion_tokens", None))
+                return None, "OUTPUT_EMPTY"
+            data = json.loads(content)
             cache.parent.mkdir(parents=True, exist_ok=True)
             cache.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2),
                              encoding="utf-8")

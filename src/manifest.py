@@ -83,8 +83,41 @@ def new_manifest(run_id: str, operator: str, model_cfg: dict,
     }
 
 
+def summarize_calls(run_id: str, since: str | None = None) -> dict:
+    """从 logs.jsonl 汇总本次运行的实际调用次数。
+
+    README 承诺 manifest 的 `calls` 统计 api_ok / cache_hit / failed，此前一直输出全 0
+    （字段建了但没人写）。这里在落盘前从日志回算，不依赖调用链传状态。
+    `since` 用 manifest 的 started_at 过滤——logs.jsonl 是追加写的，
+    同一 run_id 重跑时不会把上一轮算进来。
+    """
+    p = ROOT / "runs" / run_id / "logs.jsonl"
+    counts = {"api_ok": 0, "cache_hit": 0, "failed": 0, "total": 0}
+    if not p.exists():
+        return counts
+    for line in p.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("event") != "llm_call":
+            continue
+        if since and rec.get("ts", "") < since:
+            continue
+        status = rec.get("status", "")
+        if status.startswith("API_OK"):
+            counts["api_ok"] += 1
+        elif status == "CACHE_HIT":
+            counts["cache_hit"] += 1
+        else:
+            counts["failed"] += 1
+        counts["total"] += 1
+    return counts
+
+
 def save_manifest(run_id: str, m: dict) -> Path:
     m["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    m["calls"] = summarize_calls(run_id, m.get("started_at"))
     p = ROOT / "runs" / run_id / "manifest.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(m, ensure_ascii=False, indent=2, sort_keys=True),

@@ -13,7 +13,14 @@
 ## 2. API 调用方式
 
 1. `base_url`：`https://api.deepseek.com`。
-2. 推理参数：`temperature=0`、`top_p=1`、`max_tokens=1500`、`stream=false`。
+2. 推理参数：`temperature=0`、`top_p=1`、`max_tokens=8000`、`stream=false`。
+   （1）`max_tokens` 必须写在 `src/llm.py` 的 `PARAMS` 里才能参与缓存键；单独传给接口的话，
+   改了它缓存却不失效，会命中旧结果，"结果可复现"失真。
+   （2）`deepseek-flash` 是**推理模型**：`reasoning_content` 与正文共享 `max_tokens` 预算。
+   实测 1500/4000 时，指标密集的批次会把额度全烧在推理上，正文返回空串
+   （`finish_reason=length`、`content=''`）。故提高到 8000，并限制批大小：
+   `match_item` 40 条/批、`match_claim` **5 条/批**。
+   （3）正文为空时**不重试**：属参数问题，重试同一输入只会白烧额度。
 3. 结构化输出：`response_format={"type":"json_object"}`；提示词必须含 `json` 字样并给出输出样例。
 4. 凭据来源：只从环境变量或 `.env` 读取；日志、报告、manifest 中一律掩码显示。
 5. 缓存机制：`cache_key = sha256(提示词内容 + 模型标识 + 推理参数 + 输入数据)`，不含凭据与时间戳。因此同一输入在任何机器上命中同一份缓存，评审无需 API Key 即可复现。

@@ -2,13 +2,33 @@
 """任务级接口：加载提示词 -> 调用闸门 -> schema 校验 -> 失败修复重试。
 上层（pipeline / cli）只使用本模块，不直接接触 src.llm.call。"""
 from pathlib import Path
+
+import yaml
+
 from src.llm import call
 from src.schemas import SCHEMA_BY_TASK
 from src.manifest import sha256_text
+from src.validators import (check_enum_whitelist, check_evidence,
+                            check_no_amounts)
 
 ROOT = Path(__file__).resolve().parents[1]
 PROMPT_DIR = ROOT / "prompts"
+FIELDS_YAML = ROOT / "rules" / "fields.yaml"
 DEFAULT_VERSION = "v1"
+
+# 异常原因候选（冻结）：5 类确定性归因 + 1 个"无法判断"兜底
+ALLOWED_CAUSES = {"UNIT_SCALE", "PERIOD_MISMATCH", "SCOPE_MIXED",
+                  "VALUE_ERROR", "SIGN_ERROR", "UNCERTAIN"}
+
+# 证据由程序回填的任务：模型只做语义判断，不产出位置（interfaces.md §3.1a、§3.3a）
+PROGRAM_EVIDENCE_TASKS = {"match_item", "match_claim"}
+
+
+def load_item_codes() -> set[str]:
+    """从 rules/fields.yaml 读出标准科目编号，作为模型 item_code / canonical_item 的合法取值。"""
+    with FIELDS_YAML.open(encoding="utf-8") as f:
+        fields = yaml.safe_load(f)["fields"]
+    return set(fields)
 
 
 def load_prompt(task: str, version: str = DEFAULT_VERSION) -> tuple[str, dict]:
@@ -30,31 +50,54 @@ def load_prompt(task: str, version: str = DEFAULT_VERSION) -> tuple[str, dict]:
     return text, meta
 
 
+def _post_checks(data: dict, task: str, context: dict | None) -> list[str]:
+    """第二/三层校验：枚举白名单 + 证据真实性 + 报告数字白名单。
+    context 可携带 {"chunks": {chunk_id: text}, "allowed_numbers": set[str]}。
+    返回错误列表，空列表表示通过。"""
+    errs = []
+    errs += check_enum_whitelist(data, {"item_codes": load_item_codes(),
+                                        "causes": ALLOWED_CAUSES})
+    ctx = context or {}
+    chunks = ctx.get("chunks") or {}
+    # 证据由程序回填的任务，模型不产出位置，故不校验模型证据
+    if task not in PROGRAM_EVIDENCE_TASKS and data.get("evidence") and chunks:
+        ok, msg = check_evidence(data["evidence"], chunks)
+        if not ok:
+            errs.append(msg)
+    if task == "gen_report_text" and ctx.get("allowed_numbers"):
+        errs += check_no_amounts(data.get("text", ""), ctx["allowed_numbers"])
+    return errs
+
+
 def call_task(task: str, payload: dict, run_id: str, user_id: str = "team",
-              offline: bool = False) -> tuple[dict | None, str]:
-    """返回 (通过 schema 校验的结果 dict 或 None, 状态字符串)"""
+              offline: bool = False, context: dict | None = None) -> tuple[dict | None, str]:
+    """返回 (通过全部校验的结果 dict 或 None, 状态字符串)。
+    校验顺序：Pydantic 结构 → 枚举白名单 → 证据真实性 → 数字白名单；任一失败修复重试一次。"""
     if task not in SCHEMA_BY_TASK:
         raise KeyError(f"未注册的任务：{task}（可用：{list(SCHEMA_BY_TASK)}）")
     prompt_text, _meta = load_prompt(task)
     schema_cls = SCHEMA_BY_TASK[task]
 
     data, status = call(prompt_text, payload, run_id=run_id,
-                        user_id=user_id, offline=offline)
+                        user_id=user_id, task=task, offline=offline)
     if data is None:
         return None, status
 
-    try:
-        return schema_cls.model_validate(data).model_dump(), status
-    except Exception as e:
-        # 修复重试一次：把校验错误回传，要求只按样例输出
-        fix_payload = dict(payload)
-        fix_payload["_fix"] = (f"上次输出未通过结构校验：{e}。"
-                               "请严格按 json 样例输出，只包含约定字段。")
-        data2, status2 = call(prompt_text, fix_payload, run_id=run_id,
-                              user_id=user_id, offline=offline)
-        if data2 is None:
-            return None, status2 + "|SCHEMA_FIX_NO_RESULT"
+    for attempt in range(2):
         try:
-            return schema_cls.model_validate(data2).model_dump(), status2 + "|SCHEMA_FIXED"
-        except Exception as e2:
-            return None, f"SCHEMA_INVALID:{e2}"
+            validated = schema_cls.model_validate(data).model_dump()
+            errs = _post_checks(validated, task, context)
+        except Exception as e:
+            errs = [str(e)]
+        if not errs:
+            return validated, status + ("|SCHEMA_FIXED" if attempt else "")
+        if attempt == 0:
+            # 修复重试一次：把校验错误回传，要求只按样例输出
+            fix_payload = dict(payload)
+            fix_payload["_fix"] = (f"上次输出未通过校验：{'；'.join(errs)}。"
+                                   "请严格按 json 样例输出，只包含约定字段与合法取值。")
+            data, status = call(prompt_text, fix_payload, run_id=run_id,
+                                user_id=user_id, task=task, offline=offline)
+            if data is None:
+                return None, status + "|SCHEMA_FIX_NO_RESULT"
+    return None, "SCHEMA_INVALID:" + ";".join(errs[:3])

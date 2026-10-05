@@ -8,7 +8,9 @@
 
 ## 2. API 调用方式
 - 协议：OpenAI 兼容；base_url = https://api.deepseek.com
-- 参数：temperature=0, top_p=1, max_tokens=1500, response_format={"type":"json_object"}
+- 参数：temperature=0, top_p=1, max_tokens=8000, response_format={"type":"json_object"}
+  （`deepseek-flash` 为推理模型，reasoning 与正文共享 max_tokens；1500 会导致正文被截断为空串。
+  该值必须写在 `src/llm.py` 的 `PARAMS` 中，才能参与缓存键。）
 - 结构化输出：提示词含 "json" 字样并给出输出样例
 - 凭据：仅从环境变量/.env 读取；日志与报告一律掩码显示
 - 缓存：cache_key = sha256(提示词内容 + 模型标识 + 参数 + 输入数据)，与凭据无关，因此换人换机器命中同一份缓存，评审无需 API Key 即可复现

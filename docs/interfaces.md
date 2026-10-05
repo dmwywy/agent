@@ -1,5 +1,9 @@
 # 接口契约 interfaces.md
 
+**版本：v1.2**
+（v1.0 → v1.1：科目归一化的证据改为程序回填，见 §3.1 与 §5.2；
+v1.1 → v1.2：研报引用匹配的证据同样改为程序回填，见 §3.3；生效日期 2026-10-03）
+
 ## 0. 文档用途与生效方式
 
 （1）本文件是全组数据交接的唯一依据。任何字段名、类型、枚举取值、文件路径的变更，都必须先修改本文件、升版本号（v1.0 → v1.1）、并在组内通知，然后才改代码。
@@ -184,15 +188,29 @@
   "model_id": "deepseek-flash",
   "mappings": [
     {"item_raw": "营业总收入", "canonical_item": "TOTAL_REVENUE",
-     "confidence": 0.95, "decision": "MODEL"},
-    {"item_raw": "其中：主营业务收入", "canonical_item": "",
-     "confidence": 0.20, "decision": "MODEL"}
+     "confidence": 0.95, "decision": "MODEL",
+     "evidence": {
+       "sources": [{"page": 42, "chunk_id": "p042_t2", "raw_text": "营业总收入 102,350.00",
+                    "scope": "CONSOLIDATED", "period": "2025", "verified": true}],
+       "verified": true}}
   ],
   "rejected": [
     {"item_raw": "营业收入合计", "reason": "canonical_item 不在标准清单内"}
+  ],
+  "review": [
+    {"item_raw": "其他业务收入", "reason": "无解析记录或原文片段校验未通过"}
   ]
 }
 ```
+
+（3.1a）**证据由程序回填，不由模型产出**（v1.1 新增）。理由：科目在财报中的位置
+（`page`/`chunk_id`/`raw_text`）在数字经济A 的解析记录里本就存在（§2.1 字段 [9][10][11]），
+程序可直接关联；让模型复述 `chunk_id` 无信息增益，反而多一条"抄错即误杀正确映射"的误报路径。
+比赛明确考核误报控制与来源定位，故位置一律由程序确定性产出，符合 §5.3 禁则3「模型不生成页码」。
+
+（3.1b）`evidence.verified` 判定规则：该 `item_raw` 的每个来源记录都满足
+「`raw_header` 真实出现在该记录 `raw_text` 中」。`verified=false` 或 `sources` 为空的映射
+**不得进入规则核查与报告**，一律列入 `review` 人工复核清单。
 
 （3）规则侧使用方式：
 
@@ -222,6 +240,49 @@
 ```
 
 （3）规则：**证据校验不通过的模型结论一律丢弃**，不得进入规则计算，也不得写进报告。
+
+### 3.3 研报引用匹配结果（v1.2 新增）
+
+（1）路径：`runs/<run_id>/llm/claim_matches.json`
+
+（2）格式：
+
+```json
+{
+  "run_id": "20261003_demo",
+  "status": "API_OK",
+  "claims_sent": 39,
+  "fields_offered": 65,
+  "matches": [
+    {"claim_id": "r2024_p04_002", "item_code": "TOTAL_REVENUE", "period": "2024",
+     "confidence": 0.88, "reason": "句子指向2024年营业总收入",
+     "evidence": {"file": "贵州茅台【2024全年】模拟研究报告.docx",
+                  "section": "核心观点", "sentence": "2024 年公司实现营业总收入…",
+                  "verified": true}}
+  ],
+  "review": [
+    {"claim_id": "r2024_p07_014", "reason": "模型未返回该条的匹配结果",
+     "sentence": "2024 年收入增长目标 9%左右。"}
+  ]
+}
+```
+
+（3）**证据由程序回填**，理由同 §3.1a：一批最多 40 条 claim，单个 `evidence` 字段无法覆盖；
+且引用位置（研报文件名 + 章节 + 原句）本就是程序自己的输入，让模型复述没有信息增益。
+每条 claim 的语义依据由 `ClaimMatch.reason` 承载。
+
+（4）`item_code` / `period` 返回空字符串表示"该句引用的指标不在字段清单内"（属正常结果，
+不判为错误）；`confidence < 0.5` 时规则侧应将该条降级为 `REVIEW`。
+
+（5）**一条 claim 可对应多条 match**（v1.2 起）。研报句子常同时提到多个指标
+（"营业总收入 1741.4 亿元，归母净利润 862.3 亿元"），`claim_id` 不唯一约束：
+每个指标各占一条，共用同一 `claim_id`。只返回一条会漏掉句中其余指标，
+导致落在后面的指标错误检查不到（实测：单位错误恰在第二个指标上，会被漏报）。
+
+（6）模型未返回的 claim 一律写入 `review`，**不得猜测、不得跳过**。
+
+（7）**数值比较不由模型做**：本文件只产出"这句在说哪个科目、哪个期间"，
+金额比对是 C研 维度规则的职责（由规则侧完成）。
 
 ## 4. 接口 [3]：规则侧 → 报告侧（数字经济B → 信息工程）
 
@@ -345,6 +406,8 @@
 `match_item` → `MatchItemOut`；`unit_period` → `UnitPeriodOut`；`match_claim` → `MatchClaimOut`；`explain_anomaly` → `ExplainOut`；`gen_report_text` → `ReportTextOut`。
 
 所有输出必须包含 `evidence`（含 `chunk_id` 与 `quote`）。
+**例外（v1.1）**：`match_item` 的输出不含 `evidence`，其证据由程序回填，理由见 §3.1（3.1a）。
+其余四类任务仍必须由模型返回 `evidence` 并通过程序校验。
 
 ### 5.3 模型三条禁则
 

@@ -45,3 +45,32 @@ def build_explain_anomaly(rule_id: str, diff_desc: str, chunk_id: str,
         "quote": quote[:200],
         "candidates": candidates,      # ["UNIT_SCALE","PERIOD_MISMATCH","SCOPE_MIXED","..."]
     }
+
+# ---------- 核查报告结论文字：只给"结构"，数字由程序在模板里填 ----------
+MAX_ANOMALY_ITEMS = 30
+
+def build_gen_report_text(dimensions: dict, anomalies: list[dict],
+                          grade_label: str) -> dict:
+    """报告结论文字。模型只写定性表述，**不产出任何数字**。
+
+    dimensions: {"C内": {"pass":10,"fail":1,"review":0,"na":0}, ...}
+                数量是给模型判断"多数/少数"用的，不是让它复述——复述会被
+                validators.check_no_amounts 的数字白名单拦下。
+    anomalies:  [{"rule_id":"BS01","dimension":"C内","item_code":"TOTAL_ASSETS",
+                  "status":"FAIL"}, ...]
+    grade_label: 分级中文名，如"基本一致"（由程序按 CSI 判定）
+    """
+    safe = [{
+        "rule_id": a.get("rule_id", ""),
+        "dimension": a.get("dimension", ""),
+        "item_code": a.get("item_code", ""),   # 只给科目编号，**不给金额与差额**
+        "status": a.get("status", ""),
+    } for a in anomalies[:MAX_ANOMALY_ITEMS]]
+
+    return {
+        "task": "gen_report_text",
+        "dimensions": dimensions,
+        "anomaly_items": safe,
+        "grade_label": grade_label,
+        "omitted_anomalies": max(0, len(anomalies) - MAX_ANOMALY_ITEMS),
+    }
