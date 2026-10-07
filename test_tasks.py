@@ -456,6 +456,25 @@ def test_cross_period_rule_detects_mismatch():
     assert xq and xq[0]["status"] == "FAIL"
 
 
+def test_zero_anomaly_run_does_not_crash():
+    """一条 FAIL/REVIEW 都没有时不落 explanations.json，流程不得因此崩掉。
+
+    此前 pipeline 无条件读该文件，导致"数据干净、零异常"的运行在最后一步报
+    FileNotFoundError——越干净的输入越走不通。
+    """
+    import json as _json
+    from src.pipeline import ROOT, explain_summary
+    run_id = "pytest_zero_anomaly"
+    base = ROOT / "runs" / run_id / "rules"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "explanations.json").unlink(missing_ok=True)
+    assert explain_summary(run_id) == "无异常，无需解释"
+
+    (base / "explanations.json").write_text(
+        _json.dumps({"explained": 3}, ensure_ascii=False), encoding="utf-8")
+    assert explain_summary(run_id) == "3 条"
+
+
 def test_csi_normalizes_and_grades():
     """CSI 只对有可执行规则的维度归一化；全不可执行时输出 null 而非 0。"""
     from src.rules_engine import compute_csi
@@ -465,6 +484,219 @@ def test_csi_normalizes_and_grades():
     assert ok["weights_normalized"]["C内"] == 1.0        # 只剩一个维度 → 权重归一到 1
     empty = compute_csi([], cfg)
     assert empty["csi"] is None and empty["grade"] == "NA"
+
+
+def test_cross_period_rule_accepts_distinct_end_and_beg_items():
+    """期末/期初可以是两个不同编号（权益变动表把两者拆开），也必须能对上。"""
+    from src.rules_engine import run_rules
+    out = run_rules([
+        {"item_code": "SI_UNDIST_END", "period": "2023-12-31", "period_type": "BAL_END",
+         "value": "500.00", "unit_raw": "元", "raw_text": "四、本期期末余额 …"},
+        {"item_code": "SI_UNDIST_BEG", "period": "2023-12-31", "period_type": "BAL_BEG",
+         "value": "500.00", "unit_raw": "元", "raw_text": "二、本年期初余额 …"},
+    ], "pytest_cross_beg")
+    r = [x for x in out["results"] if x["rule_id"].startswith("XQ_UNDIST")]
+    assert r and r[0]["status"] == "PASS", "期初/期末拆成两个编号后跨期规则失效"
+
+
+def test_report_year_rule_aligns_end_beg_and_period_amounts():
+    """报告年度对齐：期末(2024-12-31)、期初(2023-12-31)、时期数(2024) 合到同一期再算。
+
+    这三种期间按 (period, period_type) 分组会落进三个组、每组都缺字段而误判 NA。
+    """
+    from src.rules_engine import run_rules
+    recs = [
+        {"item_code": "SI_UNDIST_END", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "1000.00", "unit_raw": "元", "raw_text": "四、本期期末余额 …"},
+        {"item_code": "SI_UNDIST_BEG", "period": "2023-12-31", "period_type": "BAL_BEG",
+         "value": "800.00", "unit_raw": "元", "raw_text": "二、本年期初余额 …"},
+        {"item_code": "SI_NP_PARENT", "period": "2024", "period_type": "FY",
+         "value": "300.00", "unit_raw": "元", "raw_text": "（一）综合收益总额 …"},
+        {"item_code": "SI_SURPLUS_APPROP", "period": "2024", "period_type": "FY",
+         "value": "-50.00", "unit_raw": "元", "raw_text": "1．提取盈余公积 …"},
+        {"item_code": "SI_DIVIDEND", "period": "2024", "period_type": "FY",
+         "value": "-50.00", "unit_raw": "元", "raw_text": "3．对所有者（或股东）的分配 …"},
+    ]
+    out = run_rules(recs, "pytest_report_year")
+    si = [r for r in out["results"] if r["rule_id"].startswith("SI01")]
+    assert si and si[0]["status"] == "PASS", "报告年度对齐未生效"
+    assert si[0]["period"] == "2024"
+
+    broken = [dict(r) for r in recs]
+    broken[0]["value"] = "1234.00"
+    out2 = run_rules(broken, "pytest_report_year_bad")
+    si2 = [r for r in out2["results"] if r["rule_id"].startswith("SI01")]
+    assert si2[0]["status"] == "FAIL" and si2[0]["diff"] == "234.00"
+
+
+def test_zero_if_absent_only_defaults_the_listed_fields():
+    """固定模板表的空白行按 0 计（zero_if_absent），锚点字段缺失仍判 NA。
+
+    调节项若被一律按 0 计（取到值也不用），等式会退化成"差额=全部调节项之和"。
+    """
+    from src.rules_engine import run_rules
+    recs = [
+        {"item_code": "SUPP_CF_OPERATING", "period": "2024", "period_type": "FY",
+         "value": "1300.00", "unit_raw": "元", "raw_text": "经营活动产生的现金流量净额 …"},
+        {"item_code": "SUPP_NET_PROFIT", "period": "2024", "period_type": "FY",
+         "value": "1000.00", "unit_raw": "元", "raw_text": "净利润 …"},
+        # 有取到值的调节项必须用真实值（此处 300 = 1300 − 1000）
+        {"item_code": "SUPP_DEPRECIATION", "period": "2024", "period_type": "FY",
+         "value": "300.00", "unit_raw": "元", "raw_text": "固定资产折旧 …"},
+    ]
+    out = run_rules(recs, "pytest_zero_if_absent")
+    cf = [r for r in out["results"] if r["rule_id"].startswith("CF02")]
+    assert cf and cf[0]["status"] == "PASS", f"调节项被当成 0：{cf[0].get('fields')}"
+    assert cf[0]["fields"]["SUPP_DEPRECIATION"] == "300.00"
+
+    # 锚点字段缺失 → NA，不得因为"其余项都能按 0 计"而算成通过
+    out2 = run_rules([r for r in recs if r["item_code"] != "SUPP_NET_PROFIT"],
+                     "pytest_zero_if_absent_na")
+    cf2 = [r for r in out2["results"] if r["rule_id"].startswith("CF02")]
+    assert cf2 and all(r["status"] == "NA" for r in cf2)
+
+
+def test_rule_library_size_and_field_references():
+    """规则库 20–30 条（《项目思路》要求），且每条引用的字段都在字典里。"""
+    import yaml
+    from src.pipeline import ROOT
+    fields = yaml.safe_load((ROOT / "rules" / "fields.yaml").read_text(encoding="utf-8"))
+    cfg = yaml.safe_load((ROOT / "rules" / "rules.yaml").read_text(encoding="utf-8"))
+    codes = set(fields["fields"])
+    rules = cfg["rules"]
+    assert 20 <= len(rules) <= 30, f"规则条数 {len(rules)} 不在 20–30"
+    for rule in rules:
+        for key in ("requires", "zero_if_absent"):
+            for c in rule.get(key, []):
+                assert c in codes, f"{rule['rule_id']} 引用未定义字段 {c}"
+        for key in ("item", "item_beg"):
+            if rule.get(key):
+                assert rule[key] in codes
+    # 五个维度都要有规则，否则 CSI 会缺维度
+    dims = {r["dimension"] for r in rules}
+    assert {"C内", "C间", "C期", "C附"} <= dims
+
+
+# ---------- F2：分部数据 / 所有者权益变动表 / 附注明细的抽取 ----------
+
+def test_segment_table_attribution_by_section():
+    """分部表按小节归属：同名行在不同小节含义不同，不切小节就会串数。"""
+    from tools.extract_fields import _scan_segment_table
+    rows = [
+        ["主营业务分行业情况"],
+        ["分行业", "营业收入", "营业成本", "毛利率（%）"],
+        ["酒类", "1000.00", "400.00", "60.00"],
+        ["主营业务分产品情况"],
+        ["分产品", "营业收入", "营业成本", "毛利率（%）"],
+        ["茅台酒", "700.00", "250.00", "64.00"],
+        ["其他系列酒", "300.00", "150.00", "50.00"],
+    ]
+    parsed = _scan_segment_table(rows)
+    got = {(r[0], r[1]) for r in parsed}
+    assert ("REVENUE_LIQUOR", "1000.00") in got
+    assert ("REVENUE_MOUTAI", "700.00") in got
+    assert ("REVENUE_SERIES", "300.00") in got
+    assert ("COST_SERIES", "150.00") in got
+    # item_raw 是原文行名，且必须出现在 raw_text 里（否则证据校验判未通过）
+    for code, value, raw_text, _no, label in parsed:
+        assert label in raw_text and label in ("酒类", "茅台酒", "其他系列酒")
+    # 列头没确认"营业收入在第 1 列"时整表不取，不能按猜的列号取数
+    bad = [["主营业务分产品情况"], ["分产品", "营业成本", "营业收入"], ["茅台酒", "250.00", "700.00"]]
+    assert _scan_segment_table(bad) == []
+
+
+def test_equity_table_parsing_carries_year_to_continuation():
+    """权益变动表在 Word 里常被拆成"表主体 + 续表"，续表没有年份，必须沿用上一张的。"""
+    from tools.extract_fields import _scan_equity_table
+    head = ["项目", "2024 年度"]
+    title_row = ["", "归属于母公司所有者权益", "少数股东权益", "所有者权益合计"]
+    cells = [""] * 16
+    cells[0], cells[9], cells[11] = "四、本期期末余额", "50.00", "900.00"
+    cells[13], cells[14], cells[15] = "950.00", "30.00", "980.00"
+    main = [head, title_row, cells]
+    cont = [["6．其他"] + [""] * 15, cells]
+
+    rows, year = _scan_equity_table(main, None)
+    assert year == 2024
+    got = {r[0]: r for r in rows}
+    assert got["SI_UNDIST_END"][1] == "900.00" and got["SI_UNDIST_END"][2] == "2024-12-31"
+    assert got["SI_EQ_TOTAL_END"][1] == "980.00"
+    # item_raw 必须是原文行名，且真的出现在 raw_text 里（证据包含性校验要用）
+    assert got["SI_UNDIST_END"][6] == "四、本期期末余额"
+    assert got["SI_UNDIST_END"][6] in got["SI_UNDIST_END"][4]
+
+    # 续表：没有年份表头 → 沿用 2024；列数不符 → 整表不取（宁可不取也不取错）
+    rows2, year2 = _scan_equity_table(cont, year)
+    assert year2 == 2024 and {r[0] for r in rows2} == set(got)
+    rows3, _ = _scan_equity_table([head, ["四、本期期末余额"] + [""] * 5], None)
+    assert rows3 == []
+
+
+def test_equity_row_period_types_are_not_mixed():
+    """期末/期初是时点数，综合收益与利润分配是时期数——期间不许混（§1.5）。"""
+    from tools.extract_fields import _scan_equity_table
+    head = ["项目", "2024 年度"]
+
+    def row(label, undist="10.00"):
+        c = [""] * 16
+        c[0], c[11] = label, undist
+        return c
+
+    rows, _ = _scan_equity_table(
+        [head, row("二、本年期初余额"), row("四、本期期末余额"),
+         row("（一）综合收益总额"), row("1．提取盈余公积"), row("3．对所有者（或股东）的分配")], None)
+    by_code = {r[0]: (r[2], r[3]) for r in rows}
+    assert by_code["SI_UNDIST_BEG"] == ("2023-12-31", "BAL_BEG")
+    assert by_code["SI_UNDIST_END"] == ("2024-12-31", "BAL_END")
+    assert by_code["SI_NP_PARENT"] == ("2024", "FY")
+    assert by_code["SI_SURPLUS_APPROP"] == ("2024", "FY")
+    assert by_code["SI_DIVIDEND"] == ("2024", "FY")
+
+
+def test_cf_supplement_matcher_is_order_sensitive():
+    """补充资料表用「包含」匹配且顺序敏感：短键排前面会把长键的行抢走。"""
+    from tools.extract_fields import NOTE_TARGETS, _match_note_item
+    spec = NOTE_TARGETS["现金流量表补充资料"]
+    assert _match_note_item(spec, "净利润") == "SUPP_NET_PROFIT"
+    assert _match_note_item(spec, "经营活动产生的现金流量净额") == "SUPP_CF_OPERATING"
+    assert _match_note_item(spec, "现金及现金等价物净增加额") == "SUPP_CF_NET_INCREASE"
+    # 2024 写"折耗"、2025 写"折旧"，同一行两种写法都要认
+    assert _match_note_item(spec, "固定资产折旧、油气资产折耗、生产性生物资产折旧") == "SUPP_DEPRECIATION"
+    assert _match_note_item(spec, "固定资产折旧、油气资产折旧、生产性生物资产折旧") == "SUPP_DEPRECIATION"
+    assert _match_note_item(spec, "处置固定资产、无形资产和其他长期资产的损失（收益以“ － ”号填列）") == "SUPP_DISPOSAL_LOSS"
+    assert _match_note_item(spec, "固定资产报废损失（收益以“ - ”号填列）") == "SUPP_SCRAP_LOSS"
+    # 小节标题行也含"净利润"，但它以冒号结尾、不是数据行，必须挡掉
+    assert _match_note_item(spec, "1.将净利润调节为经营活动现金流量：") is None
+    assert _match_note_item(spec, "2.不涉及现金收支的重大投资和筹资活动：") is None
+
+
+def test_note_headings_distinguish_section_and_subsection():
+    """一级小节 "5、 应收账款" 与子小节 "（2）按坏账计提方法分类披露" 必须分开认。
+
+    混为一谈的话，note 会被子小节标题覆盖，货币资金小节之后的表全被错抽。
+    """
+    from tools.extract_fields import NOTE_HEADING_RE, NOTE_SUBHEADING_RE
+    assert NOTE_HEADING_RE.match("5、 应收账款").group(1) == "应收账款"
+    assert NOTE_HEADING_RE.match("8. 货币资金√适用").group(1) == "货币资金"
+    assert NOTE_HEADING_RE.match("（1）现金流量表补充资料") is None
+    assert NOTE_SUBHEADING_RE.match("（1）按账龄披露").group(1) == "按账龄披露"
+    assert NOTE_SUBHEADING_RE.match("(2).按坏账计提方法分类披露").group(1) == "按坏账计提方法分类披露"
+
+
+def test_ar_note_row_target_sums_to_net_receivable():
+    """应收账款附注：净额 = 账面余额 − 坏账准备（规则表 7/26 条的口径）。"""
+    from tools.extract_fields import _match_row_target, _squash
+    got = _match_row_target("应收账款", "按坏账计提方法分类披露")
+    assert got is not None, "应收账款坏账计提附注未配置"
+    assert _match_row_target("其他应收款", "按坏账计提方法分类披露") is None, \
+        "其他应收款附注结构相同，不能当成应收账款"
+    assert _match_row_target("应收账款", "按账龄披露") is None
+    row = ["合计", "19,995,290.75", "/", "1,021,098.00", "/", "18,974,192.75"]
+    _, cur, _ = got
+    from decimal import Decimal
+    assert Decimal(row[cur["AR_GROSS"]].replace(",", "")) \
+        - Decimal(row[cur["AR_BADDEBT"]].replace(",", "")) == Decimal("18974192.75")
+    assert _squash("（一）综合收益总额") == "(一)综合收益总额"
 
 
 # ---------- G：核查报告生成 ----------

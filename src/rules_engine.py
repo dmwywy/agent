@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import json
 import operator
+import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -80,22 +81,18 @@ def _index(records: list[dict]) -> dict[tuple[str, str, str], dict]:
     return idx
 
 
-def _cross_period_pairs(records: list[dict]) -> dict[str, list[str]]:
-    """找出可以做跨期衔接的科目：同一 period 同时存在 BAL_END 与 BAL_BEG 记录。
+def _cross_period_periods(records: list[dict], end_code: str, beg_code: str) -> list[str]:
+    """找出可以做跨期衔接的时点：该 period 上既有期末记录、又有期初记录。
 
-    即"某年期末数"在下一年的年报里以"期初数"再次出现——两者必须相等。
+    即"某年期末数"在下一年报里以"期初数"再次出现——两者必须相等。
+    期末与期初可以用**不同的 item_code**（权益变动表把期末/期初拆成两个编号，
+    因为期初数还要参与"报告年度对齐"的勾稽，语义上不是同一个字段）。
     """
-    by_item: dict[str, dict[str, set]] = {}
-    for r in records:
-        if r.get("period_type") in ("BAL_END", "BAL_BEG"):
-            by_item.setdefault(r["item_code"], {}).setdefault(r["period"], set()).add(
-                r["period_type"])
-    out = {}
-    for code, periods in by_item.items():
-        both = sorted(p for p, kinds in periods.items() if {"BAL_END", "BAL_BEG"} <= kinds)
-        if both:
-            out[code] = both
-    return out
+    ends = {r["period"] for r in records
+            if r.get("period_type") == "BAL_END" and r["item_code"] == end_code}
+    begs = {r["period"] for r in records
+            if r.get("period_type") == "BAL_BEG" and r["item_code"] == beg_code}
+    return sorted(ends & begs)
 
 
 def _read_json(p: Path, default=None):
@@ -103,6 +100,41 @@ def _read_json(p: Path, default=None):
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
+
+
+def _field_periods() -> dict[str, str]:
+    """item_code -> 期间性质（FY / BAL_END / BAL_BEG），取自 fields.yaml（唯一真源）。
+
+    报告年度对齐要用它来认"这个字段该取哪一类记录"：
+    未分配利润期末是 BAL_END、期初是 BAL_BEG，两个都叫"未分配利润"，
+    不看字典就分不出哪个是哪个。
+    """
+    cfg = yaml.safe_load((ROOT / "rules" / "fields.yaml").read_text(encoding="utf-8"))
+    return {c: m.get("period", "FY") for c, m in cfg.get("fields", {}).items()}
+
+
+def _report_year(period: str, ptype: str) -> int | None:
+    """记录归属的**报告年度**：期初余额属于下一年度的报告期。
+
+    2024 年报里"期初未分配利润 172,983,178,300.09（2023-12-31 时点）"，
+    报告年度是 2024——它和 2024 年的净利润、利润分配同属一期。
+    """
+    m = re.match(r"(\d{4})", str(period))
+    if not m:
+        return None
+    y = int(m.group(1))
+    return y + 1 if ptype == "BAL_BEG" else y
+
+
+def _by_report_year(idx: dict, code: str, want: str) -> dict[int, dict]:
+    out: dict[int, dict] = {}
+    for (c, period, ptype), rec in idx.items():
+        if c != code or ptype != want:
+            continue
+        y = _report_year(period, ptype)
+        if y is not None:
+            out.setdefault(y, rec)
+    return out
 
 
 def _evidence(rec: dict) -> dict:
@@ -115,6 +147,80 @@ def _evidence(rec: dict) -> dict:
     return loc
 
 
+def _skipped(base: dict, status: str, reason: str) -> dict:
+    """缺字段 / 求值失败的统一形态：左值右值全空，绝不猜数。"""
+    return {**base, "status": status, "reason": reason, "left": None,
+            "right": None, "diff": None, "tolerance": None, "evidence": None}
+
+
+def _expression_result(base: dict, rule: dict, env: dict, used: dict,
+                       profile: dict, unit_floor: dict) -> dict:
+    """表达式规则的求值与判级（两种取值方式共用，避免两处各写一遍而渐渐分叉）。"""
+    try:
+        diff = safe_eval(rule["expr"], env)
+    except (ExpressionError, InvalidOperation, ZeroDivisionError) as e:
+        return _skipped(base, "REVIEW", f"表达式无法求值：{e}")
+    # 证据取金额最大的那条记录：它最可能是"这笔账的关键凭证"
+    ref = max(used.values(), key=lambda r: abs(Decimal(r["value"])))
+    peak = max((abs(v) for v in env.values()), default=Decimal("0"))
+    tol = _tolerance(profile, unit_floor, peak, peak, ref.get("unit_raw", "元"))
+    return {
+        **base,
+        "status": "PASS" if abs(diff) <= tol else "FAIL",
+        "left": {"expr": rule["expr"], "value": str(diff)},
+        "right": {"expected": "0", "value": "0"},
+        "diff": str(diff), "tolerance": str(tol),
+        "fields": {c: str(v) for c, v in env.items()},
+        "scope": rule.get("scope", "CONSOLIDATED"),
+        "evidence": _evidence(ref),
+    }
+
+
+def _report_year_results(rule: dict, idx: dict, ptypes: dict, rules_cfg: dict,
+                         profile: dict, unit_floor: dict) -> list[dict]:
+    """按报告年度逐期执行表达式规则，返回 interfaces.md §4.1 形态的结果。
+
+    每个报告年度一条结果：同一期内的期末/期初/时期数取齐后一起代入表达式，
+    缺字段的年判 NA（不计入分母），不跨期拿数凑。
+    """
+    per_code = {c: _by_report_year(idx, c, ptypes.get(c, "FY"))
+                for c in rule.get("requires", []) + rule.get("zero_if_absent", [])}
+    years = sorted({y for m in per_code.values() for y in m}, reverse=True)
+    out = []
+    for y in years:
+        env: dict[str, Decimal] = {}
+        used: dict[str, dict] = {}
+        missing = []
+        for code in rule.get("requires", []):
+            rec = per_code[code].get(y)
+            if rec is None:
+                missing.append(code)
+            else:
+                env[code] = Decimal(rec["value"])
+                used[code] = rec
+        for code in rule.get("zero_if_absent", []):
+            rec = per_code[code].get(y)
+            if rec is None:
+                env[code] = Decimal("0")
+            else:
+                env[code] = Decimal(rec["value"])
+                used[code] = rec
+        base = {
+            "rule_id": f"{rule['rule_id']}@{rules_cfg['version']}",
+            "dimension": rule.get("dimension", ""),
+            "period": str(y), "period_type": "REPORT_YEAR",
+            "expr": rule.get("expr", ""),
+            "severity": rule.get("severity", "MED"),
+            "applicable_if": rule.get("applicable_if", "always"),
+            "human_review": None,
+        }
+        if missing:
+            out.append(_skipped(base, "NA", f"缺字段：{','.join(missing)}"))
+            continue
+        out.append(_expression_result(base, rule, env, used, profile, unit_floor))
+    return out
+
+
 def run_rules(records: list[dict], run_id: str, offline: bool = False) -> dict:
     """执行全部规则，返回 {"results": [...], "csi": {...}} 并落盘。
 
@@ -123,6 +229,7 @@ def run_rules(records: list[dict], run_id: str, offline: bool = False) -> dict:
     rules_cfg = yaml.safe_load((ROOT / "rules" / "rules.yaml").read_text(encoding="utf-8"))
     tol_cfg = yaml.safe_load((ROOT / "rules" / "tolerance.yaml").read_text(encoding="utf-8"))
     profiles, unit_floor = tol_cfg["profiles"], tol_cfg.get("unit_floor", {})
+    ptypes = _field_periods()
     idx = _index(records)
     results: list[dict] = []
 
@@ -130,12 +237,22 @@ def run_rules(records: list[dict], run_id: str, offline: bool = False) -> dict:
         dim = rule.get("dimension", "")
         tol_name = rule.get("tolerance", "MAIN_TABLE")
 
+        # ---- 报告年度对齐：同一报告期内的时点数与时期数一起算 ----
+        # 权益变动表的勾稽要同时用到"期末余额（2024-12-31）""期初余额（2023-12-31）"
+        # 和"本年净利润/利润分配（FY 2024）"三种期间，按 (period, period_type)
+        # 分组会把它们拆到三个组里、每组都缺字段而误判 NA。
+        if rule.get("kind") == "report_year":
+            results.extend(_report_year_results(rule, idx, ptypes, rules_cfg,
+                                                profiles[tol_name], unit_floor))
+            continue
+
         # ---- 跨期衔接：同一时点，期末数 vs 下一年报的期初数 ----
         if rule.get("kind") == "cross_period":
             code = rule["item"]
-            for period in _cross_period_pairs(records).get(code, []):
+            beg_code = rule.get("item_beg", code)
+            for period in _cross_period_periods(records, code, beg_code):
                 end = idx.get((code, period, "BAL_END"))
-                beg = idx.get((code, period, "BAL_BEG"))
+                beg = idx.get((beg_code, period, "BAL_BEG"))
                 if not end or not beg:
                     continue
                 l, r = Decimal(end["value"]), Decimal(beg["value"])
@@ -146,7 +263,7 @@ def run_rules(records: list[dict], run_id: str, offline: bool = False) -> dict:
                     "dimension": dim, "status": "PASS" if abs(diff) <= tol else "FAIL",
                     "left": {"item_code": code, "period": period,
                              "period_type": "BAL_END", "value": str(l)},
-                    "right": {"item_code": code, "period": period,
+                    "right": {"item_code": beg_code, "period": period,
                               "period_type": "BAL_BEG", "value": str(r)},
                     "diff": str(diff), "tolerance": str(tol),
                     "severity": rule.get("severity", "MED"),
@@ -156,12 +273,13 @@ def run_rules(records: list[dict], run_id: str, offline: bool = False) -> dict:
                 })
             continue
 
-        # ---- 表达式规则：在同一 (scope, period_type, period) 下取数 ----
-        scope = rule.get("scope", "CONSOLIDATED")
-        # 用该规则所需字段中"最常见"的期别组合，避免把时点数与时期数混算
+        # ---- 表达式规则：在同一 (period_type, period) 下取数 ----
+        # 用该规则所需字段中"最常见"的期别组合，避免把时点数与时期数混算。
+        # zero_if_absent 的字段同样要进 env——它们只是"没取到就按 0 计"，
+        # 取到了就必须用真实值，否则会算成"所有调节项都是 0"。
         envs: dict[tuple[str, str], dict[str, Decimal]] = {}
         used: dict[tuple[str, str], dict[str, dict]] = {}
-        for code in rule.get("requires", []):
+        for code in rule.get("requires", []) + rule.get("zero_if_absent", []):
             for (c, period, ptype), rec in idx.items():
                 if c != code:
                     continue
@@ -172,6 +290,11 @@ def run_rules(records: list[dict], run_id: str, offline: bool = False) -> dict:
         for key, env in sorted(envs.items()):
             period, ptype = key
             missing = [c for c in rule.get("requires", []) if c not in env]
+            # zero_if_absent：固定模板表（如现金流量表补充资料）逐行印出全部调节项，
+            # 空白行表示"本年无此项金额"（=0），与"未披露"不同，故按 0 计。
+            # ★ 仅对本规则显式列出的字段生效；`requires` 里的字段照旧缺一判 NA。
+            for c in rule.get("zero_if_absent", []):
+                env.setdefault(c, Decimal("0"))
             base = {
                 "rule_id": f"{rule['rule_id']}@{rules_cfg['version']}",
                 "dimension": dim, "period": period, "period_type": ptype,
@@ -182,34 +305,10 @@ def run_rules(records: list[dict], run_id: str, offline: bool = False) -> dict:
             }
             if missing:
                 # 字段缺失 → 该条不适用，不计入分母（不猜、不判错）
-                results.append({**base, "status": "NA",
-                                "reason": f"缺字段：{','.join(missing)}",
-                                "left": None, "right": None,
-                                "diff": None, "tolerance": None, "evidence": None})
+                results.append(_skipped(base, "NA", f"缺字段：{','.join(missing)}"))
                 continue
-            try:
-                diff = safe_eval(rule["expr"], env)
-            except (ExpressionError, InvalidOperation, ZeroDivisionError) as e:
-                results.append({**base, "status": "REVIEW",
-                                "reason": f"表达式无法求值：{e}",
-                                "left": None, "right": None,
-                                "diff": None, "tolerance": None, "evidence": None})
-                continue
-
-            ref = max(used[key].values(), key=lambda r: abs(Decimal(r["value"])))
-            l_val = max((abs(v) for v in env.values()), default=Decimal("0"))
-            tol = _tolerance(profiles[tol_name], unit_floor, l_val, l_val,
-                             ref.get("unit_raw", "元"))
-            results.append({
-                **base,
-                "status": "PASS" if abs(diff) <= tol else "FAIL",
-                "left": {"expr": rule["expr"], "value": str(diff)},
-                "right": {"expected": "0", "value": "0"},
-                "diff": str(diff), "tolerance": str(tol),
-                "fields": {c: str(v) for c, v in env.items()},
-                "scope": scope,
-                "evidence": _evidence(ref),
-            })
+            results.append(_expression_result(base, rule, env, used[key],
+                                              profiles[tol_name], unit_floor))
 
     # ★ C研 的结果由 src/research_check.py 产出（存在单独的 research_claims.json），
     #   必须并入 CSI 计算——《项目思路》的公式里 C研 占 0.20 权重，

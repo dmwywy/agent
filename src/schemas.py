@@ -33,7 +33,7 @@ class UnitPeriodOut(BaseModel):
 class ClaimMatch(BaseModel):
     claim_id: str
     item_code: str               # 只能填 fields.yaml 里的 code
-    period: str = ""             # 如 FY2025 / H1_2025
+    period: str = ""             # 如 2025（时期）/ 2025-12-31（时点）；与项目期间编码一致
     confidence: float = Field(ge=0, le=1)
     reason: str = ""
 

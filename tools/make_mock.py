@@ -26,7 +26,7 @@ from pathlib import Path
 # 从 tools/ 目录直接运行时要能 import src
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.inputs import build_match_claim, build_match_item
+from src.inputs import MAX_ITEMS, build_match_claim, build_match_item
 from src.llm import cache_key
 from src.pipeline import (CLAIM_BATCH, _claim_fields, _standard_items,
                           load_config, load_structured)
@@ -41,7 +41,11 @@ def build_payloads(task: str, cfg: dict) -> list[dict]:
 
     if task == "match_item":
         headers = sorted({r["item_raw"] for r in records if r.get("item_raw")})
-        return [build_match_item(headers, _standard_items())]
+        standard = _standard_items()
+        # 与 pipeline.run_match_item 一样按 MAX_ITEMS 分批：规则库扩容后
+        # 一份年报的科目名已超过 40 个，不分批会直接触发断言（实测踩过）。
+        return [build_match_item(headers[i:i + MAX_ITEMS], standard)
+                for i in range(0, len(headers), MAX_ITEMS)]
 
     if task == "match_claim":
         path = cfg.get("run", {}).get("materials", {}).get("report_claims", "")

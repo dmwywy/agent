@@ -29,7 +29,7 @@ def build_unit_period(chunk_id: str, header_text: str,
 # ---------- 研报引用匹配：判断"这句话在说哪个指标"，不判断对错 ----------
 def build_match_claim(claims: list[dict], fields: list[dict]) -> dict:
     """claims: [{"claim_id":"c01","sentence":"...30字内..."}]
-       fields: [{"item_code":"REVENUE","period":"FY2025"}]  ← 只给科目和期间，不给金额"""
+       fields: [{"item_code":"REVENUE","period":"2025"}]  ← 只给科目和期间，不给金额"""
     safe_claims = [{"claim_id": c["claim_id"], "sentence": c["sentence"][:500]}
                    for c in claims[:MAX_ITEMS]]
     return {"task": "match_claim", "claims": safe_claims, "fields": fields}
@@ -53,9 +53,8 @@ def build_gen_report_text(dimensions: dict, anomalies: list[dict],
                           grade_label: str) -> dict:
     """报告结论文字。模型只写定性表述，**不产出任何数字**。
 
-    dimensions: {"C内": {"pass":10,"fail":1,"review":0,"na":0}, ...}
-                数量是给模型判断"多数/少数"用的，不是让它复述——复述会被
-                validators.check_no_amounts 的数字白名单拦下。
+    dimensions: {"C内": {"status":"HAS_ISSUES"}, ...}
+                只传定性标记，不把结果计数交给模型。
     anomalies:  [{"rule_id":"BS01","dimension":"C内","item_code":"TOTAL_ASSETS",
                   "status":"FAIL"}, ...]
     grade_label: 分级中文名，如"基本一致"（由程序按 CSI 判定）
@@ -67,10 +66,15 @@ def build_gen_report_text(dimensions: dict, anomalies: list[dict],
         "status": a.get("status", ""),
     } for a in anomalies[:MAX_ANOMALY_ITEMS]]
 
+    safe_dimensions = {}
+    for name, counts in dimensions.items():
+        has_issue = bool(counts.get("fail", 0) or counts.get("review", 0))
+        safe_dimensions[name] = {"status": "HAS_ISSUES" if has_issue else "CLEAR"}
+
     return {
         "task": "gen_report_text",
-        "dimensions": dimensions,
+        "dimensions": safe_dimensions,
         "anomaly_items": safe,
         "grade_label": grade_label,
-        "omitted_anomalies": max(0, len(anomalies) - MAX_ANOMALY_ITEMS),
+        "has_omitted_anomalies": len(anomalies) > MAX_ANOMALY_ITEMS,
     }

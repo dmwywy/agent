@@ -6,6 +6,7 @@
 """
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 from src.pipeline import ROOT, run
@@ -120,6 +121,8 @@ def main(argv=None):
     g.add_argument("--offline", action="store_true", help="离线模式，只读缓存")
     g.add_argument("--year", type=int, default=None,
                    help="文件名里没有年份时用它作默认报告期")
+    g.add_argument("--report-folder", default=None,
+                   help="将本次 runs/<run-id> 全部产物复制到该目录（例如桌面上的结果文件夹）")
 
     rp = sub.add_parser("report", help="生成核查报告（PDF / Excel / 网页）")
     rp.add_argument("--run-id", required=True)
@@ -143,6 +146,22 @@ def main(argv=None):
         print_summary(args.run_id)
         if not args.no_report:
             print_report(args.run_id)
+        if args.report_folder:
+            source = ROOT / "runs" / args.run_id
+            target = Path(args.report_folder).expanduser().resolve() / args.run_id
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                for child in source.iterdir():
+                    destination = target / child.name
+                    if child.is_dir():
+                        shutil.copytree(child, destination, dirs_exist_ok=True,
+                                        ignore=shutil.ignore_patterns("*.tmp", "*.lock"))
+                    elif child.is_file():
+                        shutil.copy2(child, destination)
+                print(f"  已复制运行产物到 {target}")
+            except OSError as e:
+                print(f"  复制到指定目录失败：{e}")
+                print(f"  本次产物仍保存在 {source}")
     elif args.cmd == "report":
         print_report(args.run_id, args.formats)
     else:

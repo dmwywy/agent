@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 STATEMENT_ZH = {"BS": "资产负债表", "IS": "利润表", "CF": "现金流量表",
-                "NOTE": "附注", "MDNA": "管理层讨论与分析"}
+                "EQ": "所有者权益变动表", "NOTE": "附注", "MDNA": "管理层讨论与分析"}
 PERIOD_ZH = {"BAL_END": "期末时点", "BAL_BEG": "期初时点",
              "FY": "全年累计", "YTD": "年初至今累计"}
 

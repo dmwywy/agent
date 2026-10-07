@@ -1,6 +1,8 @@
 # rules/fields.yaml  —— 全项目字段字典：A 按此提数，B 按此取数，模型按此返回 item_code
 # 约定期：amount 类型的值一律为字符串形式的十进制数，禁止浮点；source=NOTE 时必须带 note_ref
-version: "1.0"
+# v1.1：补分部数据（MDNA 10 项）、所有者权益变动表（EQ 13 项）、
+#       现金流量表补充资料调节项（NOTE 17 项）——为规则库扩到 27 条提供数据源。
+version: "1.1"
 
 fields:
   # ---- 资产负债表 ----
@@ -40,15 +42,72 @@ fields:
   SUPP_NET_PROFIT:   {zh: 补充资料净利润,        type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
   SUPP_CF_OPERATING: {zh: 补充资料经营活动现金流量净额, type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
 
+  # ---- 现金流量表补充资料：净利润调节为经营活动现金流量的各项（规则表 16 条完整式）----
+  # 该表是国家会计准则的**固定模板**，逐行列示；空白的行表示本年无此项金额（即 0），
+  # 与"未披露"不同——所以 CF02 允许这些项缺失时按 0 计（见 rules.yaml 的 zero_if_absent）。
+  # 符号沿用原表填列方向（如"存货的减少（增加以'－'号填列）"为负表示存货增加）。
+  SUPP_ASSET_IMPAIRMENT: {zh: 补充资料资产减值准备,        type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_CREDIT_LOSS:  {zh: 补充资料信用减值损失,            type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_DEPRECIATION: {zh: 补充资料固定资产折旧,            type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_AMORT_ROU:    {zh: 补充资料使用权资产摊销,          type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_AMORT_INTANGIBLE: {zh: 补充资料无形资产摊销,        type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_AMORT_LT:     {zh: 补充资料长期待摊费用摊销,        type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_DISPOSAL_LOSS: {zh: 补充资料处置长期资产的损失,     type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_SCRAP_LOSS:   {zh: 补充资料固定资产报废损失,        type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_FV_LOSS:      {zh: 补充资料公允价值变动损失,        type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_FIN_EXPENSE:  {zh: 补充资料财务费用,                type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_INV_LOSS:     {zh: 补充资料投资损失,                type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_DTA_DECREASE: {zh: 补充资料递延所得税资产减少,      type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_DTL_INCREASE: {zh: 补充资料递延所得税负债增加,      type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_INV_DECREASE: {zh: 补充资料存货的减少,              type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_RECV_DECREASE: {zh: 补充资料经营性应收项目的减少,   type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_PAYABLE_INCREASE: {zh: 补充资料经营性应付项目的增加, type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+  SUPP_CF_NET_INCREASE: {zh: 补充资料现金及现金等价物净增加额, type: amount, statement: NOTE, period: FY, source: NOTE, note_ref: "第十节 现金流量表补充资料", core: false}
+
+  # ---- 所有者权益变动表（第十节，规则表 13/15/18 条）----
+  # statement=EQ 属 interfaces.md §2.1[8] 的主表枚举（BS/IS/CF/EQ/NOTE）。
+  # 期间性质严格分开：期末/期初余额是时点（BAL_END/BAL_BEG），
+  # 综合收益、提取盈余公积、对所有者的分配是时期数（FY）。
+  # ★ 提取盈余公积 / 对所有者的分配 取的是**未分配利润列**的金额（提取与分配使
+  #   未分配利润减少，故为负数）；这样 SI01 才能直接做加总而不必猜正负号。
+  SI_UNDIST_END:     {zh: 未分配利润期末,              type: amount, statement: EQ, period: BAL_END, source: MAIN, note_ref: "第十节 合并所有者权益变动表 未分配利润列", core: false}
+  SI_UNDIST_BEG:     {zh: 未分配利润期初,              type: amount, statement: EQ, period: BAL_BEG, source: MAIN, note_ref: "第十节 合并所有者权益变动表 未分配利润列", core: false}
+  SI_SURPLUS_END:    {zh: 盈余公积期末,                type: amount, statement: EQ, period: BAL_END, source: MAIN, note_ref: "第十节 合并所有者权益变动表 盈余公积列", core: false}
+  SI_SURPLUS_BEG:    {zh: 盈余公积期初,                type: amount, statement: EQ, period: BAL_BEG, source: MAIN, note_ref: "第十节 合并所有者权益变动表 盈余公积列", core: false}
+  SI_EQ_PARENT_END:  {zh: 权益变动表归母权益期末小计,   type: amount, statement: EQ, period: BAL_END, source: MAIN, note_ref: "第十节 合并所有者权益变动表 小计列", core: false}
+  SI_EQ_PARENT_BEG:  {zh: 权益变动表归母权益期初小计,   type: amount, statement: EQ, period: BAL_BEG, source: MAIN, note_ref: "第十节 合并所有者权益变动表 小计列", core: false}
+  SI_EQ_MINORITY_END: {zh: 权益变动表少数股东权益期末,  type: amount, statement: EQ, period: BAL_END, source: MAIN, note_ref: "第十节 合并所有者权益变动表 少数股东权益列", core: false}
+  SI_EQ_TOTAL_END:   {zh: 权益变动表所有者权益合计期末, type: amount, statement: EQ, period: BAL_END, source: MAIN, note_ref: "第十节 合并所有者权益变动表 所有者权益合计列", core: false}
+  SI_NP_PARENT:      {zh: 权益变动表归母净利润,        type: amount, statement: EQ, period: FY, source: MAIN, note_ref: "第十节 合并所有者权益变动表 综合收益总额行 未分配利润列", core: false}
+  SI_OCI_PARENT:     {zh: 权益变动表其他综合收益,      type: amount, statement: EQ, period: FY, source: MAIN, note_ref: "第十节 合并所有者权益变动表 综合收益总额行 其他综合收益列", core: false}
+  SI_CI_PARENT:      {zh: 权益变动表归母综合收益总额,  type: amount, statement: EQ, period: FY, source: MAIN, note_ref: "第十节 合并所有者权益变动表 综合收益总额行 小计列", core: false}
+  SI_SURPLUS_APPROP: {zh: 提取盈余公积,                type: amount, statement: EQ, period: FY, source: MAIN, note_ref: "第十节 合并所有者权益变动表 提取盈余公积行 未分配利润列", core: false}
+  SI_DIVIDEND:       {zh: 对所有者的分配,              type: amount, statement: EQ, period: FY, source: MAIN, note_ref: "第十节 合并所有者权益变动表 对所有者（或股东）的分配行 未分配利润列", core: false}
+
   # ---- 附注来源（必须带 note_ref，否则无法定位证据）----
   CASH_ON_HAND:      {zh: 库存现金,          type: amount,  statement: NOTE, period: BAL_END, source: NOTE, note_ref: "附注七、1 货币资金", core: false}
   CASH_IN_BANK:      {zh: 银行存款,          type: amount,  statement: NOTE, period: BAL_END, source: NOTE, note_ref: "附注七、1 货币资金", core: false}
   CASH_OTHER:        {zh: 其他货币资金,      type: amount,  statement: NOTE, period: BAL_END, source: NOTE, note_ref: "附注七、1 货币资金", core: false}
   AR_GROSS:          {zh: 应收账款账面余额,  type: amount,  statement: NOTE, period: BAL_END, source: NOTE, note_ref: "附注七、5 应收账款", core: false}
   AR_BADDEBT:        {zh: 坏账准备,          type: amount,  statement: NOTE, period: BAL_END, source: NOTE, note_ref: "附注七、5 应收账款", core: false}
-  REVENUE_MOUTAI:    {zh: 茅台酒营业收入,    type: amount,  statement: MDNA, period: FY,      source: MDNA, note_ref: "第三节 主营业务分产品", core: false}
-  REVENUE_SERIES:    {zh: 系列酒营业收入,    type: amount,  statement: MDNA, period: FY,      source: MDNA, note_ref: "第三节 主营业务分产品", core: false}
   TOTAL_SHARES:      {zh: 总股本,            type: shares,  statement: NOTE, period: BAL_END, source: NOTE, note_ref: "第一节 重要提示", core: false}
+
+  # ---- 分部数据（第三节 管理层讨论与分析，规则表 11/12 条）----
+  # 来源表 "主营业务分行业、分产品、分地区、分销售模式情况"，四个小节各是一组分解，
+  # 同一张表内 "酒类" 既出现在分行业小节也出现在成本分析表，必须靠小节标题归属。
+  # ★ "分部小计" 不等于利润表营业收入：酒类 170,611,838,052.02 vs 营业收入
+  #   170,899,152,276.34，差额 287,314,224.32 是其他业务收入，未在分部表中单独披露。
+  #   因此 IS04/IS06/IS07 只做**分部表内部**的加总核对，不拿去比利润表营业收入。
+  REVENUE_LIQUOR:    {zh: 酒类营业收入,      type: amount,  statement: MDNA, period: FY, source: MDNA, note_ref: "第三节 主营业务分行业情况", core: false}
+  COST_LIQUOR:       {zh: 酒类营业成本,      type: amount,  statement: MDNA, period: FY, source: MDNA, note_ref: "第三节 主营业务分行业情况", core: false}
+  REVENUE_MOUTAI:    {zh: 茅台酒营业收入,    type: amount,  statement: MDNA, period: FY, source: MDNA, note_ref: "第三节 主营业务分产品情况", core: false}
+  COST_MOUTAI:       {zh: 茅台酒营业成本,    type: amount,  statement: MDNA, period: FY, source: MDNA, note_ref: "第三节 主营业务分产品情况", core: false}
+  REVENUE_SERIES:    {zh: 系列酒营业收入,    type: amount,  statement: MDNA, period: FY, source: MDNA, note_ref: "第三节 主营业务分产品情况", core: false}
+  COST_SERIES:       {zh: 系列酒营业成本,    type: amount,  statement: MDNA, period: FY, source: MDNA, note_ref: "第三节 主营业务分产品情况", core: false}
+  REVENUE_DOMESTIC:  {zh: 国内营业收入,      type: amount,  statement: MDNA, period: FY, source: MDNA, note_ref: "第三节 主营业务分地区情况", core: false}
+  REVENUE_OVERSEAS:  {zh: 国外营业收入,      type: amount,  statement: MDNA, period: FY, source: MDNA, note_ref: "第三节 主营业务分地区情况", core: false}
+  REVENUE_WHOLESALE: {zh: 批发代理营业收入,  type: amount,  statement: MDNA, period: FY, source: MDNA, note_ref: "第三节 主营业务分销售模式情况", core: false}
+  REVENUE_DIRECT:    {zh: 直销营业收入,      type: amount,  statement: MDNA, period: FY, source: MDNA, note_ref: "第三节 主营业务分销售模式情况", core: false}
 
 # 规则引擎使用约束（写进代码断言）：
 # 1. type=amount 的值禁止转 float；参与计算前一律 Decimal(str(v))

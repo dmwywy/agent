@@ -112,7 +112,7 @@ macOS / Linux：
 
 | `MODEL_ID` 取值 | 说明 | 建议用途 |
 |---|---|---|
-| `deepseek-flash` | 更快、更省 | 科目归一化、单位与期间识别等批量任务（默认） |
+| `deepseek-flash` | DeepSeek-V4.1-Flash 的 API 模型标识；适用于受限分类与映射任务（默认） |
 | `deepseek-v4-pro` | 能力更强 | 复杂语义判断、异常原因解释 |
 
 代码内置白名单校验：`MODEL_ID` 不在上表范围内时，程序在启动瞬间报错并说明原因，
@@ -137,11 +137,26 @@ macOS / Linux：
 
 检查六项：模型名称、调用方式、输入格式、返回格式、错误处理、联网边界。
 
-### 3. 字段字典自检
+### 3. 字段字典与规则库自检
 
     python tools\check_fields.py
 
-校验 `rules/fields.yaml` 自身完整性，以及 `rules/rules.yaml` 中引用的字段是否都已定义。
+校验 `rules/fields.yaml` 自身完整性（期间/附注定位）、`rules/rules.yaml` 引用的字段是否都已定义、
+规则写法是否合法（`kind` / `requires` 与 `zero_if_absent` 是否自相矛盾），以及规则条数是否在 20–30。
+
+**规则库**：`rules/rules.yaml` 共 **27 条**（另有 C研 的 `RC01`，在 `src/research_check.py`），
+五个维度与数据来源：
+
+| 维度 | 条数 | 规则 | 数据来源 |
+|---|---|---|---|
+| C内 表内勾稽 | 12 | BS01 BS02 IS03–IS07 CF01 CF02 SI01–SI03 | 合并主表、第三节分部表、现金流量表补充资料、合并所有者权益变动表 |
+| C间 表间一致 | 7 | LJ01–LJ07 | 主表 ↔ 补充资料 / 所有者权益变动表 |
+| C期 跨期衔接 | 6 | XQ_CASH XQ_AR XQ_INV XQ_UNDIST XQ_SURPLUS XQ_EQ_PARENT | 同一时点在本期期初与上期期末的两次出现 |
+| C附 主表附注 | 2 | NB01 NB02 | 附注七、1 货币资金；附注七、5 应收账款 |
+| C研 研报引用 | 1 | RC01（每条 claim 一例） | 研报原文 vs 财报结构化数据 |
+
+逐条规则的字段需求、容差档位与出处见 `rules/rules.yaml` 注释；字段清单见
+`docs/field_mapping_v1.md`（由 `tools/export_fields.py` 从 `rules/fields.yaml` 生成）。
 
 ### 4. 返回结构与证据校验
 
@@ -160,11 +175,14 @@ macOS / Linux：
 跑完会打印一份运行摘要：
 
     运行完成  run_id = 20261005_demo
-      模型调用     api_ok=3  cache_hit=0  failed=0  合计=3
-      科目归一化   API_OK(try=1)  22 条（待复核 0）
-      研报引用匹配 API_OK(try=1)  53 条（覆盖 39/39 条 claim，待复核 0）
-      C研 数值比对 FAIL=1  PASS=1（待人工复核 51）
-      规则核查     跳过（数字经济B 的 src.rules_engine 尚未交付）
+      模型调用     api_ok=11  cache_hit=0  failed=0  合计=11
+      科目归一化   API_OK(try=1)  66 条（待复核 0）
+      研报引用匹配 API_OK(try=1)  103 条（覆盖 81/81 条 claim，待复核 0）
+      C研 数值比对 FAIL=4  PASS=4（待人工复核 95）
+      规则核查     78 条  NA=10  PASS=68
+      异常解释     4 条  API_OK(try=1)
+      一致性指数   CSI=95.0  等级 A（高度一致）
+        分项       C内:1.0  C期:1.0  C研:0.5  C间:1.0  C附:1.0
       产物目录     runs/20261005_demo/
 
 **在线模式**需要 `.env` 里的 `DEEPSEEK_API_KEY`；**离线模式**不需要密钥、不联网：
@@ -202,6 +220,12 @@ macOS / Linux：
 **数据隔离**：现场解析结果全部写在 `runs/<run_id>/ingested/` 下，
 **不写**共享的 `data/structured/`。因为 `load_structured` 会把目录下所有
 `*.json` 全读进来，若往共享目录堆文件，两批材料会混在一起用。
+
+**桌面文件夹演示（无需仓库预置 `data/`）**：在桌面创建 `财务核查材料`，放入年报和研究报告；指定一个可写的结果目录（例如 `C:\\Users\\<用户名>\\Desktop\\财务核查结果`），运行：
+
+    python -m fincheck ingest --from "$env:USERPROFILE\Desktop\财务核查材料" --run-id onsite_demo --report-folder "$env:USERPROFILE\Desktop\财务核查结果"
+
+程序按文件内容识别并解析材料，结果先写入项目的 `runs/onsite_demo/ingested/`，再将本次完整运行目录（PDF、Excel、HTML 报告，结构化字段、规则结果及日志）复制到 `桌面\财务核查结果\onsite_demo\`。需准备可读取的年报与研究报告；默认在线调用需配置 `.env` 中的 `DEEPSEEK_API_KEY`。`--offline` 只使用匹配缓存，未命中会转人工复核。每次运行用不同 `--run-id`，避免覆盖既有结果。
 
 ### 8. 核查报告（PDF / Excel / 网页）
 
@@ -403,8 +427,8 @@ macOS / Linux：
 | `llm/mappings.json` | 科目归一化结果：财报原文科目名 → 标准科目编号，含程序回填的来源证据 | ✅ |
 | `llm/claim_matches.json` | 研报引用匹配：每条 claim → 科目 + 期间 | ✅ |
 | `rules/research_claims.json` | **C研** 研报引用数值比对结果（PASS / FAIL / REVIEW） | ✅ |
-| `rules/results.json` | 表内 / 表间 / 跨期 / 附注 四维规则明细 | ⏸ 待数字经济B 交付 `src.rules_engine` |
-| `rules/csi.json` | 各维度得分与综合一致性指数 | ⏸ 同上 |
+| `rules/results.json` | 表内 / 表间 / 跨期 / 附注 四维规则明细（`rules/rules.yaml` 共 27 条，逐期展开） | ✅ |
+| `rules/csi.json` | 各维度得分与综合一致性指数 | ✅ |
 | `rules/placeholder.json` | 无年报可核查时的占位说明 | ✅ |
 | `report.pdf` | 核查报告正式版（13 项内容 + 免责声明） | ✅ |
 | `report.xlsx` | 多表工作簿：摘要 / 异常清单 / 规则明细 / 提取字段 / 研报引用 / 待人工复核 | ✅ |

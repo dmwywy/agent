@@ -46,6 +46,10 @@ LABEL_ALIASES = {
     "负债合计": ("TOTAL_LIAB", "BS", "BAL_END"),
     "所有者权益合计": ("TOTAL_EQUITY", "BS", "BAL_END"),
     "归属于母公司所有者权益合计": ("EQUITY_PARENT", "BS", "BAL_END"),
+    # ★ 2025 年报把这行拆成了"归属于母公司所有者权益" + "（或股东权益）合计"两行
+    #   （跨表格片段），金额留在前半行、后半行是空的。只认全名会整条丢掉，
+    #   连带 BS02 / LJ05 两条规则判 NA。
+    "归属于母公司所有者权益": ("EQUITY_PARENT", "BS", "BAL_END"),
     "少数股东权益": ("EQUITY_MINORITY", "BS", "BAL_END"),
     "流动资产合计": ("CURRENT_ASSETS", "BS", "BAL_END"),
     "流动负债合计": ("CURRENT_LIAB", "BS", "BAL_END"),
@@ -85,14 +89,114 @@ NOTE_TARGETS = {
     # 用于表间核对：同一"净利润"在利润表与补充资料里应一致；
     # "经营活动现金流量净额"在现金流量表与补充资料里也应一致。
     # 年报里该小节标题写作"金流量表补充资料"（原件漏了"现"字），故用「包含」匹配。
-    "现金流量表补充资料": {"period": "FY", "items": {
-        "净利润": "SUPP_NET_PROFIT",
-        "经营活动产生的现金流量净额": "SUPP_CF_OPERATING"}},
+    #
+    # 补充资料表是**固定模板**，调节项有十几行，用「包含」匹配而不是相等：
+    # 同一行不同年份写法就不同（2024"固定资产折旧、油气资产折耗…"、
+    # 2025"固定资产折旧、油气资产折旧…"），相等匹配必漏。
+    # ★ 列表**顺序敏感**：先长后短，否则短键会抢走长键的行。
+    "现金流量表补充资料": {"period": "FY", "match": "contains", "matchers": [
+        ("经营活动产生的现金流量净额", "SUPP_CF_OPERATING"),
+        ("现金及现金等价物净增加额", "SUPP_CF_NET_INCREASE"),
+        ("净利润", "SUPP_NET_PROFIT"),
+        ("资产减值准备", "SUPP_ASSET_IMPAIRMENT"),
+        ("信用减值损失", "SUPP_CREDIT_LOSS"),
+        ("固定资产折旧", "SUPP_DEPRECIATION"),
+        ("使用权资产摊销", "SUPP_AMORT_ROU"),
+        ("无形资产摊销", "SUPP_AMORT_INTANGIBLE"),
+        ("长期待摊费用摊销", "SUPP_AMORT_LT"),
+        ("处置固定资产", "SUPP_DISPOSAL_LOSS"),
+        ("固定资产报废损失", "SUPP_SCRAP_LOSS"),
+        ("公允价值变动损失", "SUPP_FV_LOSS"),
+        ("财务费用", "SUPP_FIN_EXPENSE"),
+        ("投资损失", "SUPP_INV_LOSS"),
+        ("递延所得税资产减少", "SUPP_DTA_DECREASE"),
+        ("递延所得税负债增加", "SUPP_DTL_INCREASE"),
+        ("存货的减少", "SUPP_INV_DECREASE"),
+        ("经营性应收项目的减少", "SUPP_RECV_DECREASE"),
+        ("经营性应付项目的增加", "SUPP_PAYABLE_INCREASE"),
+    ]},
 }
 # 附注小节标题形如 "1、 货币资金√适用"（后面可能粘着适用性标记）。
 # ★ 编号分隔符必须同时接受全角顿号与半角句点：实测 2024 年报用 "1、货币资金"，
 #   2025 年报用 "8. 货币资金"——同一家公司不同年份写法就不一样，只认一种会漏。
-NOTE_HEADING_RE = re.compile(r"^\d+\s*[、.．]\s*([一-龥]{2,10})")
+NOTE_HEADING_RE = re.compile(r"^\d+\s*[、.．]\s*([一-龥]{2,12})")
+# 附注**子小节**标题形如 "（1）按账龄披露" / "(2).按坏账计提方法分类披露"。
+# 必须单独识别：不认它，note 会一直停在上一节的取值上，
+# 后面所有表都会被当成"仍在货币资金小节里"错抽。
+NOTE_SUBHEADING_RE = re.compile(r"^[（(]\s*\d+\s*[）)]\s*[.．]?\s*([一-龥]{2,14})")
+
+# ---- 按「目标行 + 固定列号」取数的附注表（规则表 7/26 条）----
+# (附注小节, 子小节关键字, 目标行, {item_code: 期末列号}, {item_code: 期初列号})
+# "按坏账计提方法分类披露"表的合计行形如：
+#   合计 | 账面余额 | 比例 | 坏账准备 | 计提比例 | 账面价值 | 期初账面余额 | …
+# 列号是硬定位，所以必须靠子小节标题把范围锁死——其他应收款附注的表结构完全相同，
+# 不锁小节就会把其他应收款当应收账款。
+NOTE_ROW_TARGETS = [
+    ("应收账款", "坏账计提方法", "合计",
+     {"AR_GROSS": 1, "AR_BADDEBT": 3}, {"AR_GROSS": 6, "AR_BADDEBT": 8}),
+]
+
+
+def _match_row_target(section: str | None, sub: str | None):
+    if not section or not sub:
+        return None
+    for sec, kw, row, cur, prev in NOTE_ROW_TARGETS:
+        if section == sec and kw in sub:
+            return row, cur, prev
+    return None
+
+# ---- 分部数据（第三节 管理层讨论与分析，规则表 11/12 条）----
+# 表形如：
+#   主营业务分行业情况          ← 小节标题独占一行
+#   分行业|营业收入|营业成本|毛利率…  ← 列头
+#   酒类|170,611,838,052.02|13,629,995,812.89|…
+# 四个小节（行业/产品/地区/销售模式）共处一张表，**必须按小节归属**：
+# "酒类"出现在分行业小节，"茅台酒/其他系列酒"出现在分产品小节，
+# 不切小节就会把小节标题行或列头行当成数据行。
+SEGMENT_SECTIONS = {
+    "主营业务分行业情况": "行业",
+    "主营业务分产品情况": "产品",
+    "主营业务分地区情况": "地区",
+    "主营业务分销售模式情况": "销售模式",
+}
+SEGMENT_HEADER_LABELS = {"分行业", "分产品", "分地区", "销售模式"}
+# (小节, 行名) -> (营业收入 item_code, 营业成本 item_code)；成本未取数的填 None
+SEGMENT_ITEMS: dict[tuple[str, str], tuple[str | None, str | None]] = {
+    ("行业", "酒类"): ("REVENUE_LIQUOR", "COST_LIQUOR"),
+    ("产品", "茅台酒"): ("REVENUE_MOUTAI", "COST_MOUTAI"),
+    ("产品", "其他系列酒"): ("REVENUE_SERIES", "COST_SERIES"),
+    ("产品", "系列酒"): ("REVENUE_SERIES", "COST_SERIES"),
+    ("地区", "国内"): ("REVENUE_DOMESTIC", None),
+    ("地区", "国外"): ("REVENUE_OVERSEAS", None),
+    ("销售模式", "批发代理"): ("REVENUE_WHOLESALE", None),
+    ("销售模式", "直销"): ("REVENUE_DIRECT", None),
+}
+SEGMENT_HEADING_RE = re.compile(r"主营业务分行业.*分产品|主营业务分产品")
+
+# ---- 所有者权益变动表（第十节，规则表 13/15/18 条）----
+# 合并表固定 16 列（母公司表 9 列，不取）。列头是**纵向合并单元格**，
+# 解析出来的表头行只有 14 个格子、与数据行对不上号（实测 2024/2025 均如此），
+# 所以列位置只能按数据行的列序号硬定位，并强制校验列数——宁可整表跳过，
+# 也不按错位的列号取数：取错了会变成规则层的一条"异常"，比不取更糟。
+#   0 项目 | 1 实收资本 | 2-4 其他权益工具 | 5 资本公积 | 6 减：库存股
+#   7 其他综合收益 | 8 专项储备 | 9 盈余公积 | 10 一般风险准备 | 11 未分配利润
+#   12 其他 | 13 归母小计 | 14 少数股东权益 | 15 所有者权益合计
+EQ_COL_COUNT = 16
+EQ_COLUMNS = {"OCI": 7, "SURPLUS": 9, "UNDIST": 11, "PARENT": 13,
+              "MINORITY": 14, "TOTAL": 15}
+# 行标签（去空白、统一括号与句点后）→ {列名: item_code}
+EQ_ROWS_END = {"UNDIST": "SI_UNDIST_END", "SURPLUS": "SI_SURPLUS_END",
+               "PARENT": "SI_EQ_PARENT_END", "MINORITY": "SI_EQ_MINORITY_END",
+               "TOTAL": "SI_EQ_TOTAL_END"}
+EQ_ROWS_BEG = {"UNDIST": "SI_UNDIST_BEG", "SURPLUS": "SI_SURPLUS_BEG",
+               "PARENT": "SI_EQ_PARENT_BEG"}
+# 综合收益总额行：未分配利润列=归母净利润，其他综合收益列=其他综合收益，小计列=归母综合收益
+EQ_ROWS_CI = {"UNDIST": "SI_NP_PARENT", "OCI": "SI_OCI_PARENT",
+              "PARENT": "SI_CI_PARENT"}
+# 表首行形如 ["项目", "2024 年度"]——年份在第二个格子里，不能用 ^ 锚定
+EQ_TITLE_RE = re.compile(r"(\d{4})\s*年\s*度")
+# 取数区间：从"合并所有者权益变动表"到"母公司所有者权益变动表"（后者在 CONTEXT_BREAKERS 里）
+EQ_HEADING = "合并所有者权益变动表"
 
 # 科目名正则：非数字开头，可含括号冒号汉字，后接可选附注号与两个金额
 ROW_RE = re.compile(
@@ -205,6 +309,133 @@ def _docx_rows(tbl_xml: str) -> list[list[str]]:
     return rows
 
 
+def _squash(s: str) -> str:
+    """去空白 + 统一全角括号/句点。行标签比对必须走这一步：
+    同一行 2024 写"（三）利润分配"、2025 写"(三)利润分配"，直接比会漏。"""
+    s = re.sub(r"\s+", "", s or "")
+    return s.replace("（", "(").replace("）", ")").replace("．", ".")
+
+
+def _match_note_item(spec: dict, label: str) -> str | None:
+    """附注表行标签 → item_code。exact 用于明细科目名，contains 用于固定模板行。"""
+    if spec.get("match") == "contains":
+        flat = re.sub(r"\s+", "", label)
+        # 以冒号结尾的是小节标题，不是数据行。补充资料表里
+        # "1．将净利润调节为经营活动现金流量："也含"净利润"，不挡掉就会被当成净利润行。
+        if flat.endswith(("：", ":")):
+            return None
+        for key, code in spec["matchers"]:
+            if key in flat:
+                return code
+        return None
+    return spec["items"].get(label.strip())
+
+
+def _eq_row_targets(label: str) -> dict | None:
+    """所有者权益变动表行标签 → {列名: item_code}；不关心的行返回 None。"""
+    s = _squash(label)
+    if s.endswith("本年期初余额"):
+        return EQ_ROWS_BEG
+    if s.endswith("本期期末余额"):
+        return EQ_ROWS_END
+    if s.endswith("综合收益总额"):
+        return EQ_ROWS_CI
+    if s.endswith("提取盈余公积"):
+        return {"UNDIST": "SI_SURPLUS_APPROP"}
+    if "对所有者" in s and s.endswith("的分配"):
+        return {"UNDIST": "SI_DIVIDEND"}
+    return None
+
+
+def _emit(records, chunk_index, seen, *, code, raw, value, period, ptype,
+          statement, locator, chunk_id, raw_text, src_name, src_hash, note_ref=None):
+    """统一构造字段记录（interfaces.md §2.1）。已出现过的 (code, period, ptype) 跳过。"""
+    if value is None or (code, period, ptype) in seen:
+        return
+    seen.add((code, period, ptype))
+    rec = {
+        "item_code": code, "item_raw": raw, "value": value.replace(",", ""),
+        "unit_raw": "元", "period_type": ptype, "period": period,
+        "scope": "CONSOLIDATED", "statement": statement,
+        "locator": locator, "chunk_id": chunk_id, "raw_text": raw_text,
+        "source_hash": src_hash, "parse_status": "OK", "confidence": 1.0,
+    }
+    if note_ref:
+        rec["note_ref"] = note_ref
+    chunk_index.setdefault(chunk_id, {"locator": locator, "source": src_name,
+                                      "chars": len(raw_text)})
+    records.append(rec)
+
+
+def _scan_segment_table(rows):
+    """分部表 → [(code, value, raw_text, row_no, label)]。
+
+    只认「小节标题行 → 列头行 → 数据行」的结构；列头行用于确认
+    第 1 列是营业收入、第 2 列是营业成本，位置不符就整表不取。
+    label 取原文行名（"茅台酒"/"国内"…），它同时是 item_raw ——
+    必须真的出现在 raw_text 里，否则证据包含性校验过不了（实测踩过：
+    用"产品"这种小节名当 item_raw，10 条记录全被打成"待人工复核"）。
+    """
+    out, section, cols_ok = [], None, False
+    for ri, cells in enumerate(rows):
+        if len(cells) == 1:
+            section = SEGMENT_SECTIONS.get(_squash(cells[0]))
+            cols_ok = False
+            continue
+        if section is None:
+            continue
+        if cells[0].strip() in SEGMENT_HEADER_LABELS:
+            cols_ok = (len(cells) > 2 and "营业收入" in cells[1] and "营业成本" in cells[2])
+            continue
+        if not cols_ok:
+            continue
+        label = cells[0].strip()
+        pairs = SEGMENT_ITEMS.get((section, _squash(label)))
+        if not pairs:
+            continue
+        for code, idx in zip(pairs, (1, 2)):
+            if code and idx < len(cells) and _CELL_VALUE_RE.match(cells[idx].strip()):
+                out.append((code, cells[idx].strip(), " | ".join(cells), ri + 1, label))
+    return out
+
+
+def _scan_equity_table(rows, eq_year):
+    """合并所有者权益变动表 → ([(code, value, period, ptype, raw_text, row_no)], 年度)。
+
+    ★ 一份权益变动表在 Word 里可能被拆成**多个表格对象**（实测 2024/2025 都是
+      "表主体 + 续表"），续表没有表头年份。因此年度要由调用方跨表传递：
+      见到新表头就换年度，见不到就沿用上一张，否则"四、本期期末余额"（在续表里）
+      会被整表丢掉——那正是本表最关键的期末数。
+    """
+    if not rows:
+        return [], eq_year
+    m = EQ_TITLE_RE.search(_squash(" ".join(rows[0])))
+    if m:
+        eq_year = int(m.group(1))
+    if eq_year is None:
+        return [], None        # 不在权益变动表区间，或首表就没有年份：不猜
+    out = []
+    for ri, cells in enumerate(rows):
+        if len(cells) != EQ_COL_COUNT:
+            continue            # 列数不符：宁可不取，也不按错位的列号取数
+        targets = _eq_row_targets(cells[0])
+        if not targets:
+            continue
+        # 期间性质由**行**决定：期末/期初是时点，综合收益与利润分配是时期（§1.5）
+        if targets is EQ_ROWS_BEG:
+            period, ptype = f"{eq_year - 1}-12-31", "BAL_BEG"
+        elif targets is EQ_ROWS_END:
+            period, ptype = f"{eq_year}-12-31", "BAL_END"
+        else:
+            period, ptype = str(eq_year), "FY"
+        raw_text = " | ".join(cells)
+        for col, code in targets.items():
+            v = cells[EQ_COLUMNS[col]].strip()
+            if _CELL_VALUE_RE.match(v):
+                out.append((code, v, period, ptype, raw_text, ri + 1, cells[0].strip()))
+    return out, eq_year
+
+
 def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
     """从 Word 文档抽数。与 PDF 版共用同一套口径状态机与科目别名表。
 
@@ -219,19 +450,71 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
     chunk_index: dict[str, dict] = {}
     seen: set[tuple[str, str]] = set()
     state: str | None = None
-    note: str | None = None          # 当前所在附注小节（如"货币资金"）
+    note: str | None = None          # 当前生效的附注目标小节（见 NOTE_TARGETS）
+    section: str | None = None       # 最近的一级附注小节名（含非目标小节）
+    sub: str | None = None           # 最近的附注子小节名（如"按账龄披露"）
     heading = ""
     table_no = 0
+    seg_pending = False              # 下一张表是否为主营业务分部表
+    eq_state = False                 # 当前是否处于合并所有者权益变动表区间
+    eq_year: int | None = None       # 当前权益变动表的年度（续表沿用上一张）
 
     for m in _BODY_TOKEN_RE.finditer(body):
         frag = m.group(0)
         if frag.startswith("<w:tbl>"):
             table_no += 1
+            rows = _docx_rows(frag)
+
+            # 分部表（第三节）：紧跟在"主营业务分行业…分产品…情况"标题后的那张表
+            if seg_pending:
+                seg_pending = False
+                for code, value, raw_text, row_no, label in _scan_segment_table(rows):
+                    _emit(records, chunk_index, seen, code=code, raw=label,
+                          value=value, period=str(year), ptype="FY",
+                          statement="MDNA",
+                          locator=f"第三节 主营业务分部表 / 表#{table_no} / 第{row_no}行",
+                          chunk_id=f"s{table_no:03d}_r{row_no:02d}", raw_text=raw_text,
+                          src_name=src_path.name, src_hash=src_hash)
+                continue
+
+            # 合并所有者权益变动表（第十节）
+            if eq_state:
+                eq_rows, eq_year = _scan_equity_table(rows, eq_year)
+                for code, value, period, ptype, raw_text, row_no, label in eq_rows:
+                    _emit(records, chunk_index, seen, code=code, raw=label,
+                          value=value, period=period, ptype=ptype, statement="EQ",
+                          locator=f"{EQ_HEADING} {eq_year}年度 / 表#{table_no} / 第{row_no}行",
+                          chunk_id=f"q{table_no:03d}_r{row_no:02d}", raw_text=raw_text,
+                          src_name=src_path.name, src_hash=src_hash)
+                if eq_year:
+                    continue        # 已确认为权益变动表：不再当主表/附注表扫
+
+            # 附注「目标行 + 固定列号」表（应收账款坏账计提）：按 (小节, 子小节) 锁定
+            rt = _match_row_target(section, sub)
+            if rt:
+                target_row, cur_cols, prev_cols = rt
+                for ri, cells in enumerate(rows):
+                    if _squash(cells[0]) != target_row:
+                        continue
+                    locator = f"{section}（附注）/ {sub} / 表#{table_no} / 第{ri + 1}行"
+                    chunk_id = f"n{table_no:03d}_r{ri + 1:02d}"
+                    for cols, period in ((cur_cols, year), (prev_cols, year - 1)):
+                        for code, ci in cols.items():
+                            if ci >= len(cells) or not _CELL_VALUE_RE.match(cells[ci].strip()):
+                                continue
+                            _emit(records, chunk_index, seen, code=code, raw=cells[0].strip(),
+                                  value=cells[ci].strip(), period=f"{period}-12-31",
+                                  ptype="BAL_END" if period == year else "BAL_BEG",
+                                  statement="NOTE", locator=locator, chunk_id=chunk_id,
+                                  raw_text=" | ".join(cells), src_name=src_path.name,
+                                  src_hash=src_hash)
+                    break          # 只取本子小节的第一张表的合计行
+
             # 附注明细表：按"项目 | 期末 | 期初"取目标明细科目
             if note in NOTE_TARGETS:
                 spec = NOTE_TARGETS[note]
-                for ri, cells in enumerate(_docx_rows(frag)):
-                    code = spec["items"].get(cells[0].strip())
+                for ri, cells in enumerate(rows):
+                    code = _match_note_item(spec, cells[0])
                     if not code:
                         continue
                     vals = [c for c in cells[1:] if _CELL_VALUE_RE.match(c.strip())]
@@ -264,7 +547,7 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
                         })
             if state is None:
                 continue
-            for ri, cells in enumerate(_docx_rows(frag)):
+            for ri, cells in enumerate(rows):
                 hit = LABEL_ALIASES.get(normalize_label(cells[0]))
                 if not hit:
                     continue
@@ -304,23 +587,33 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
                     })
         else:
             text = _strip_tags(frag)
+            if SEGMENT_HEADING_RE.search(text):
+                seg_pending = True    # 下一张表即主营业务分部表
             if text in CONSOLIDATED_TITLES:
                 state = CONSOLIDATED_TITLES[text]
-                note = None
+                note = section = sub = None
                 heading = text        # 进入主表：章节名用表标题
             elif text in CONTEXT_BREAKERS:
                 state = None          # 遇母公司报表/其他主表即切断，不混口径
-                note = None
+                note = section = sub = None
                 heading = text
+                # 权益变动表的取数区间：只在"合并"标题到"母公司"标题之间（不混口径）
+                eq_state = (text == EQ_HEADING)
+                eq_year = None        # 进入区间即清空年度，避免沿用上一份报表的年度
             else:
                 nm = NOTE_HEADING_RE.match(text)
+                sm = NOTE_SUBHEADING_RE.match(text)
                 # 先按「包含」匹配已知附注小节（原件标题可能有错字，如"金流量表补充资料"），
                 # 匹配不到再退回编号标题本身（那种小节不在 NOTE_TARGETS 里，不会被抽）
                 hit_note = next((k for k in NOTE_TARGETS if k in text), None)
                 if hit_note:
-                    note = hit_note
+                    section, note, sub = hit_note, hit_note, None
                 elif nm:
-                    note = nm.group(1)
+                    section, sub = nm.group(1), None
+                    note = section if section in NOTE_TARGETS else None
+                elif sm:
+                    # 子小节：一级小节不变，但"直接跟在节标题下的目标表"区间到此为止
+                    sub, note = sm.group(1), None
                 if text and state is None:
                     # 只在表**外**更新标题。表内若也更新，locator 会被
                     # "单位：元 币种：人民币"这类紧跟标题的行覆盖掉。

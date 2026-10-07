@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from src.inputs import build_match_claim, build_match_item
+from src.inputs import MAX_ITEMS, build_match_claim, build_match_item
 from src.research_check import run_research_check
 from src.tasks import call_task, load_prompt
 from src.manifest import new_manifest, save_manifest
@@ -110,14 +110,27 @@ def _attach_evidence(items: list[dict], records: list[dict]) -> list[dict]:
 
 def run_match_item(records: list[dict], run_id: str, offline: bool):
     """科目归一化：把 A 的原始科目名映射到标准科目编号（模型侧第一步，始终可跑）。
-    模型返回映射 → 程序回填来源证据 → 落盘 llm/mappings.json。"""
+    模型返回映射 → 程序回填来源证据 → 落盘 llm/mappings.json。
+
+    ★ 分批：一次最多 MAX_ITEMS 个科目名（inputs.py 的硬上限）。
+      规则库扩到 27 条后，一份年报的科目名个数已超过 40 个，
+      不分批会直接触发 build_match_item 的断言、整条流程走不完。
+    """
     headers = sorted({r["item_raw"] for r in records if r.get("item_raw")})
     if not headers:
         return None, "NO_HEADERS"
-    payload = build_match_item(headers, _standard_items())
-    out, status = call_task("match_item", payload, run_id, offline=offline)
+    standard = _standard_items()
+    merged, statuses = [], []
+    for i in range(0, len(headers), MAX_ITEMS):
+        out, status = call_task("match_item",
+                                build_match_item(headers[i:i + MAX_ITEMS], standard),
+                                run_id, offline=offline)
+        statuses.append(status)
+        if out:
+            merged.extend(out["items"])
+    status = "|".join(dict.fromkeys(statuses))
 
-    mappings = _attach_evidence(out["items"] if out else [], records)
+    mappings = _attach_evidence(merged, records)
     unverified = [m["raw_header"] for m in mappings
                   if m["evidence"]["sources"] and not m["evidence"]["verified"]]
     _write_json(run_id, "llm/mappings.json",
@@ -224,6 +237,21 @@ def run_match_claim(claims_path: str, records: list[dict], run_id: str, offline:
     return enriched, "|".join(dict.fromkeys(flat_status))
 
 
+def explain_summary(run_id: str) -> str:
+    """异常解释的条数摘要。
+
+    ★ 没有 explanations.json 是**正常情况**，不是错误：一轮下来一条 FAIL/REVIEW 都没有时
+      `explain_anomalies` 不会落盘（没有异常就没有需要解释的条目，见 src/explain.py）。
+      此前这里无条件读文件，导致"数据干净、零异常"的运行在最后一步崩掉——
+      越干净的输入越走不通，必须容忍。
+    """
+    p = ROOT / "runs" / run_id / "rules" / "explanations.json"
+    try:
+        return f"{json.loads(p.read_text(encoding='utf-8')).get('explained', 0)} 条"
+    except (OSError, json.JSONDecodeError):
+        return "无异常，无需解释"
+
+
 def run_rules_engine(records: list[dict], run_id: str, offline: bool):
     """规则侧钩子：数字经济B 交付 src.rules_engine 后在此接入。
 
@@ -295,9 +323,7 @@ def run(config_path: str, offline: bool = False, run_id: str = "demo",
         #   混进结果文件会让"结果可机器比对、逐字节复现"失效。
         #   结果文件保持纯确定性；模型输出单独存放，由报告/网页按编号关联展示。
         explain_anomalies(rule_res, run_id, offline, research_results=rc_res)
-        exp = json.loads((ROOT / "runs" / run_id / "rules" / "explanations.json")
-                         .read_text(encoding="utf-8"))
-        s_explain = f"{exp.get('explained', 0)} 条"
+        s_explain = explain_summary(run_id)
 
     manifest["outputs"].update({"match_item_status": s_item,
                                 "match_claim_status": s_claim,
