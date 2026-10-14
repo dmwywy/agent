@@ -121,6 +121,8 @@ def main(argv=None):
     g.add_argument("--offline", action="store_true", help="离线模式，只读缓存")
     g.add_argument("--year", type=int, default=None,
                    help="文件名里没有年份时用它作默认报告期")
+    g.add_argument("--period", choices=("annual", "half_year"), default="annual",
+                   help="年报或半年报；半年报流量数据按 YTD 期间处理")
     g.add_argument("--report-folder", default=None,
                    help="将本次 runs/<run-id> 全部产物复制到该目录（例如桌面上的结果文件夹）")
 
@@ -142,7 +144,8 @@ def main(argv=None):
     elif args.cmd == "ingest":
         from src.ingest import ingest
         ingest(args.folder, args.run_id, offline=args.offline,
-               config_path=args.config, default_year=args.year)
+               config_path=args.config, default_year=args.year,
+               report_period=args.period)
         print_summary(args.run_id)
         if not args.no_report:
             print_report(args.run_id)

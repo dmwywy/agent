@@ -78,7 +78,8 @@ def _write_json(path: Path, obj) -> None:
 
 
 def process_folder(folder: Path, out_dir: Path,
-                   default_year: int | None = None) -> dict:
+                   default_year: int | None = None,
+                   report_period: str = "annual") -> dict:
     """扫描文件夹 → 分类 → 逐份抽取到 out_dir。
 
     ★ 结果写入 out_dir（调用方传 run 专属目录），**不写共享的 data/structured/**。
@@ -93,43 +94,55 @@ def process_folder(folder: Path, out_dir: Path,
 
     files = sorted(p for p in folder.rglob("*")
                    if p.is_file() and p.suffix.lower() in SUPPORTED)
-    if not files:
-        raise SystemExit(
-            f"文件夹里没有可处理的文件：{folder}\n  支持的类型：.pdf / .docx")
 
+    # ★ 先建产物目录：下面任何一步跳过，本轮仍要能产出一份"什么都没识别到"的
+    #   报告，而不是让调用方拿到异常、什么都没有。
     out_dir.mkdir(parents=True, exist_ok=True)
     log, structured_files, all_claims = [], [], []
-    for path in files:
-        kind, hits = classify(path)
-        if kind == "unknown":
-            log.append({"file": path.name, "kind": "unknown", "hits": hits,
-                        "action": "跳过：既不像年报也不像研报"})
-            continue
+    if not files:
+        log.append({"file": "-", "kind": "unknown", "hits": 0,
+                    "action": "跳过：文件夹里没有 .pdf / .docx 文件"})
 
-        year = year_from_name(path, default_year)
-        if kind == "annual":
-            records, chunk_index = EF.extract(path, year)
-            if not records:
-                log.append({"file": path.name, "kind": kind, "hits": hits,
-                            "action": "跳过：未抽到任何核心字段"})
+    for path in files:
+        # ★ 单份材料读取/抽取失败只跳过这一份并记账，绝不中断整轮：现场上传的
+        #   可能是加密、损坏或根本不是财报的文件，任何一种都不该让"任意文件"
+        #   拿不到报告（识别不到就出一份说明性报告）。
+        try:
+            kind, hits = classify(path)
+            if kind == "unknown":
+                log.append({"file": path.name, "kind": "unknown", "hits": hits,
+                            "action": "跳过：既不像年报也不像研报"})
                 continue
-            out = out_dir / f"{path.stem}_{year}.json"
-            _write_json(out, records)
-            idx = out_dir / "chunk_index.json"
-            merged = json.loads(idx.read_text(encoding="utf-8")) if idx.exists() else {}
-            merged.update(chunk_index)
-            _write_json(idx, merged)
-            structured_files.append(out)
-            log.append({"file": path.name, "kind": kind, "hits": hits, "year": year,
-                        "action": f"抽取 {len(records)} 条字段", "out": out.name})
-        else:
-            tag = f"{year}_" + re.sub(r"[^\w]", "", path.stem)[:12]
-            claims = EC.extract(path, tag)
-            for c in claims:                      # 加文件前缀，避免多份研报 claim_id 撞车
-                c["claim_id"] = f"{tag}::{c['claim_id']}"
-            all_claims.extend(claims)
-            log.append({"file": path.name, "kind": kind, "hits": hits, "year": year,
-                        "action": f"抽取 {len(claims)} 条 claim"})
+
+            year = year_from_name(path, default_year)
+            if kind == "annual":
+                records, chunk_index = EF.extract(path, year, report_period=report_period)
+                if not records:
+                    log.append({"file": path.name, "kind": kind, "hits": hits,
+                                "action": "跳过：未抽到任何核心字段"})
+                    continue
+                out = out_dir / f"{path.stem}_{year}.json"
+                _write_json(out, records)
+                idx = out_dir / "chunk_index.json"
+                merged = json.loads(idx.read_text(encoding="utf-8")) if idx.exists() else {}
+                merged.update(chunk_index)
+                _write_json(idx, merged)
+                structured_files.append(out)
+                log.append({"file": path.name, "kind": kind, "hits": hits, "year": year,
+                            "report_period": report_period,
+                            "action": f"抽取 {len(records)} 条字段", "out": out.name})
+            else:
+                tag = f"{year}_" + re.sub(r"[^\w]", "", path.stem)[:12]
+                claims = EC.extract(path, tag)
+                for c in claims:                  # 加文件前缀，避免多份研报 claim_id 撞车
+                    c["claim_id"] = f"{tag}::{c['claim_id']}"
+                all_claims.extend(claims)
+                log.append({"file": path.name, "kind": kind, "hits": hits, "year": year,
+                            "action": f"抽取 {len(claims)} 条 claim"})
+        except (Exception, SystemExit) as e:      # noqa: BLE001
+            log.append({"file": path.name, "kind": "error", "hits": 0,
+                        "action": f"跳过：处理失败（{type(e).__name__}: {e}）"})
+            continue
 
     claims_path = None
     if all_claims:
@@ -144,12 +157,13 @@ def process_folder(folder: Path, out_dir: Path,
 
 
 def ingest(folder: str, run_id: str, offline: bool = False,
-           config_path: str = "configs/demo.yaml", default_year: int | None = None) -> dict:
+           config_path: str = "configs/demo.yaml", default_year: int | None = None,
+           report_period: str = "annual") -> dict:
     """文件夹入口：处理材料 → 直接跑流程。本次解析结果全部落在 runs/<run_id>/ 下。"""
     from src.pipeline import run
 
     out_dir = ROOT / "runs" / run_id / "ingested"
-    result = process_folder(Path(folder), out_dir, default_year)
+    result = process_folder(Path(folder), out_dir, default_year, report_period)
 
     print(f"扫描到 {result['files']} 个文件：")
     for e in result["log"]:
@@ -159,13 +173,16 @@ def ingest(folder: str, run_id: str, offline: bool = False,
     print()
 
     if not result["structured_files"]:
-        print("⚠ 没有识别出年报，财报数据为空——研报核查将没有比对基准。")
+        print("⚠ 没有识别出年报，财报数据为空——本次仍会生成一份说明性的核查报告。")
 
     run(config_path, offline=offline, run_id=run_id,
         claims_override=str(result["claims_path"].relative_to(ROOT))
         if result["claims_path"] else None,
-        data_dir_override=str(out_dir.relative_to(ROOT))
-        if result["structured_files"] else None)
+        # ★ 始终指向本轮的 ingested 目录（哪怕它是空的）：一份年报都没识别出来时，
+        #   也用它跑完流程产出报告，绝不回落到共享的 data/structured/——那是旧基线
+        #   数据，用它算出来的结果与本次上传的文件毫无关系，比"空报告"更误导人。
+        data_dir_override=str(out_dir.relative_to(ROOT)),
+        skip_claims=result["claims_path"] is None)
     result["run_id"] = run_id
     return result
 

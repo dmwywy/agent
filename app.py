@@ -3,10 +3,12 @@
 
 运行：streamlit run app.py
 
-界面只读 runs/<run_id>/ 下的产物，**不重跑流程、不调模型**——展示与计算分离，
-看到的永远是已经落盘、可复核的结果。
+页面顶部可上传财报并启动一次核查；其余结果视图仅读取 runs/<run_id>/ 下的落盘产物。
+离线模式不发网络请求，在线模式才调用已配置的模型 API。
 """
 import json
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -36,17 +38,64 @@ def list_runs() -> list[str]:
 
 
 st.title("财报一致性量化核查智能体")
-st.caption("财务报告信息一致性量化核查与研究报告纠错 · 结果视图")
+st.caption("上传财报，运行一致性核查，并查看与下载报告")
 st.warning(DISCLAIMER)
+
+with st.container(border=True):
+    st.subheader("上传材料并开始核查")
+    st.caption("拖拽或选择年报 PDF / DOCX。可只上传年报；若文件名没有年份，请填写报告年度。")
+    with st.form("report_upload_form"):
+        uploaded_files = st.file_uploader(
+            "选择年报文件", type=["pdf", "docx", "docm"],
+            accept_multiple_files=True, max_upload_size=300,
+            help="支持一份或多份年报；同一批上传的报告需属于同一种期间类型。",
+        )
+        year_default = st.number_input(
+            "文件名没有年份时使用的报告年度", min_value=2000, max_value=2100,
+            value=2025, step=1,
+        )
+        offline_mode = st.checkbox(
+            "离线运行（不调用模型，只使用本地缓存）", value=True,
+            help="离线缓存未命中时，语义任务转人工复核；规则核查和报告仍会继续。取消勾选会使用已配置的模型 API。",
+        )
+        submitted = st.form_submit_button(
+            "开始核查并生成报告", type="primary", icon=":material/fact_check:",
+        )
+
+    if submitted:
+        if not uploaded_files:
+            st.error("请先选择至少一份年报文件。")
+        else:
+            run_id = f"web_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+            try:
+                from src.web import run_uploaded_reports
+
+                with st.status("正在处理上传材料…", expanded=True) as progress:
+                    outcome = run_uploaded_reports(
+                        uploaded_files, run_id=run_id, default_year=int(year_default),
+                        offline=offline_mode, on_progress=progress.write,
+                    )
+                    progress.update(label="核查完成，报告已生成", state="complete")
+
+                st.session_state["selected_run_id"] = run_id
+                st.session_state["run_selection"] = run_id
+                st.success(f"本次运行编号：`{run_id}`。字段与核查产物保存在 `runs/{run_id}/`。")
+                st.write("报告文件：" + " · ".join(
+                    f"{fmt}: `{path}`" for fmt, path in outcome["reports"].items()
+                ))
+                st.rerun()
+            except Exception as exc:  # noqa: BLE001 - show a useful failure in the UI
+                st.error(f"核查未完成：{type(exc).__name__}: {exc}")
+                st.caption(f"已上传文件保存在 `runs/{run_id}/uploaded/`，可检查后重新运行。")
 
 runs = list_runs()
 if not runs:
-    st.info("还没有任何运行结果。请先在命令行执行：\n\n"
-            "```\npython -m fincheck ingest --from \"你的材料文件夹\" --run-id 我的测试\n```\n\n"
-            "然后刷新本页面。")
+    st.info("还没有历史运行结果。可在上方上传年报开始核查，也可使用命令行入口。")
     st.stop()
 
-run_id = st.sidebar.selectbox("选择运行编号", runs)
+default_run = st.session_state.get("selected_run_id")
+default_index = runs.index(default_run) if default_run in runs else 0
+run_id = st.sidebar.selectbox("选择运行编号", runs, index=default_index, key="run_selection")
 base = ROOT / "runs" / run_id
 manifest = _read(base / "manifest.json", {}) or {}
 results = (_read(base / "rules" / "results.json", {}) or {}).get("results", [])
@@ -80,7 +129,9 @@ c4.metric("异常 / 待复核", len(anomalies))
 c5.metric("模型调用", f"{calls.get('api_ok', 0)} 在线 / {calls.get('cache_hit', 0)} 缓存")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["① 异常清单", "② 一致性指标", "③ 提取字段", "④ 规则明细", "⑤ 报告下载"])
+    ["① 异常清单", "② 一致性指标", "③ 提取字段", "④ 规则明细", "⑤ 报告下载"],
+    key="results_tabs", on_change="rerun",
+)
 
 # ---- ① 异常清单 ----
 with tab1:
@@ -204,8 +255,13 @@ with tab5:
     found = False
     for name, label, mime in items:
         p = base / name
-        if p.exists():
-            found = True
+        if not p.exists():
+            continue
+        found = True
+        # ★ 只有本页签打开时才读报告字节并建下载按钮（报告可能较大，每次 rerun
+        #   都读盘没必要）。但"有没有报告"的判断与提示**不能**一起被门控——
+        #   否则未打开该页签时，没有报告的运行连一句提示都不显示（测试即因此失败）。
+        if tab5.open:
             st.download_button(f"⬇ {label}（{p.stat().st_size // 1024} KB）",
                                p.read_bytes(), file_name=f"{run_id}_{name}", mime=mime,
                                key=name)

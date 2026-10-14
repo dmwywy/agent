@@ -11,12 +11,23 @@
 #   report_year —— 按**报告年度**对齐取数：期末/期初/时期数合成一期后再代入表达式
 version: "1.1"
 
-dimensions:
-  C内: {name: 表内一致性,       weight: 0.25}
-  C间: {name: 表间一致性,       weight: 0.30}
-  C期: {name: 跨期间一致性,     weight: 0.15}
-  C附: {name: 主表与附注一致性, weight: 0.20}
-  C研: {name: 研报引用一致性,   weight: 0.10}
+# ===== 集中口径开关（provisional，待业务负责人正式裁定）=====
+# 本段是【CSI 维度命名 + 权重 + 有效规则集】的唯一来源；改这里再重跑即可切换口径，
+# 无需改动其它代码。容差档位的唯一来源仍是 rules/tolerance.yaml（本段不复制其数值）。
+# 四项争议的对比、推荐默认值、运行影响与裁定责任人见 docs/决策口径对比_provisional.md。
+scoring:
+  profile: default-provisional   # 生效口径名，随 csi.json 一起落盘（注明来源）
+  provisional: true              # 尚未获业务裁定，统一标注 provisional
+  # CSI 维度（命名不得改动：C内/C间/C期/C附/C研）与权重
+  dimensions:
+    C内: {name: 表内一致性,       weight: 0.25}
+    C间: {name: 表间一致性,       weight: 0.30}
+    C期: {name: 跨期间一致性,     weight: 0.15}
+    C附: {name: 主表与附注一致性, weight: 0.20}
+    C研: {name: 研报引用一致性,   weight: 0.10}
+  # 有效规则集：null = 执行下方 rules 全部（当前 27 条）；给出 rule_id 列表则只执行列出的规则。
+  # 注：C研 的 RC01 在 src/research_check.py，不在此列表内，始终计入 CSI。
+  active_rule_ids: null
 
 rules:
   - rule_id: BS01

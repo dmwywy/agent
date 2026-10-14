@@ -23,6 +23,11 @@ import json
 import sys
 from pathlib import Path
 
+# Windows 控制台常见默认编码为 GBK，无法打印勾/叉等符号；
+# 采用 UTF-8 可避免完成比较后在总结行崩溃。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,7 +66,7 @@ def main():
     args = ap.parse_args()
 
     rels = sorted(set(_files(args.a)) | set(_files(args.b)))
-    rows, failed = [], []
+    rows, deterministic_failed, model_failed = [], [], []
     for rel in rels:
         da = _digest(ROOT / "runs" / args.a / rel)
         db = _digest(ROOT / "runs" / args.b / rel)
@@ -72,8 +77,8 @@ def main():
         # 模型相关产物：非严格模式下不一致只提示、不算失败
         verdict = ("一致" if ok else
                    ("浮动（模型相关）" if model_dep and not args.strict_model else "不一致"))
-        if not ok and not (model_dep and not args.strict_model):
-            failed.append(rel)
+        if not ok:
+            (model_failed if model_dep else deterministic_failed).append(rel)
         rows.append((rel, da or "-", db or "-", verdict))
 
     print(f"比对 runs/{args.a} 与 runs/{args.b}（已剔除 run_id）\n")
@@ -82,11 +87,19 @@ def main():
         print(f"{rel:<46}{da:<26}{db:<26}{verdict}")
 
     print()
+    failed = deterministic_failed + (model_failed if args.strict_model else [])
     if failed:
-        print(f"✗ 有 {len(failed)} 项确定性产物不一致：{', '.join(failed)}")
+        if deterministic_failed:
+            print(f"✗ 有 {len(deterministic_failed)} 项确定性产物不一致："
+                  f"{', '.join(deterministic_failed)}")
+        if args.strict_model and model_failed:
+            print(f"✗ 严格模式下有 {len(model_failed)} 项模型相关产物不一致："
+                  f"{', '.join(model_failed)}")
         raise SystemExit(1)
     print("✓ 确定性产物全部逐字节一致（字段提取 / 规则核查 / CSI）")
-    if not args.strict_model:
+    if args.strict_model:
+        print("✓ 严格模式下模型相关产物也一致")
+    else:
         print("  （模型相关产物的浮动属预期；用 --strict-model 核验缓存重放）")
 
 

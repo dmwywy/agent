@@ -271,7 +271,8 @@ def run_rules_engine(records: list[dict], run_id: str, offline: bool):
 
 def run(config_path: str, offline: bool = False, run_id: str = "demo",
         claims_override: str | None = None,
-        data_dir_override: str | None = None) -> dict:
+        data_dir_override: str | None = None,
+        skip_claims: bool = False) -> dict:
     """入口：加载配置 → 解析数据 → 语义提取 → 规则核查（钩子）→ 落盘清单。
 
     claims_override / data_dir_override：由文件夹入口（src.ingest）传入本次现场
@@ -282,7 +283,7 @@ def run(config_path: str, offline: bool = False, run_id: str = "demo",
     data_dir = (data_dir_override
                 or cfg.get("paths", {}).get("structured", "data/structured"))
     materials = cfg.get("run", {}).get("materials", {})
-    claims_path = claims_override or materials.get("report_claims", "")
+    claims_path = "" if skip_claims else (claims_override or materials.get("report_claims", ""))
     operator = cfg.get("run", {}).get("user", "team")
 
     records = load_structured(data_dir)

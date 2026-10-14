@@ -801,8 +801,145 @@ def test_web_app_handles_run_without_report():
     assert any("report" in str(i.value) for i in at.info)
 
 
+def test_web_upload_orchestrator_persists_and_runs(monkeypatch):
+    """网页表单共用的上传编排应抽取、运行离线核查并请求三种报告。"""
+    from pathlib import Path
+    from src import ingest, pipeline, report
+    from src.web import ROOT, run_uploaded_reports
+
+    run_id = "pytest_web_upload_orchestrator"
+    run_root = ROOT / "runs" / run_id
+    if run_root.exists():
+        import shutil
+        shutil.rmtree(run_root)
+
+    calls = {}
+
+    class Upload:
+        name = "sample_2024.pdf"
+
+        def getvalue(self):
+            return b"local-pdf-payload"
+
+    def fake_ingest(folder, out_dir, default_year):
+        calls["uploaded"] = (folder / Upload.name).read_bytes()
+        calls["year"] = default_year
+        return {"structured_files": [out_dir / "sample.json"], "claims_path": None}
+
+    def fake_pipeline(config, **kwargs):
+        calls["pipeline"] = (config, kwargs)
+
+    def fake_reports(run, formats):
+        calls["reports"] = (run, formats)
+        return {f: f"runs/{run}/report.{f}" for f in ("pdf", "xlsx", "html")}
+
+    monkeypatch.setattr(ingest, "process_folder", fake_ingest)
+    monkeypatch.setattr(pipeline, "run", fake_pipeline)
+    monkeypatch.setattr(report, "build_all", fake_reports)
+    progress = []
+
+    try:
+        result = run_uploaded_reports(
+            [Upload()], run_id=run_id, default_year=2024, offline=True,
+            on_progress=progress.append,
+        )
+        assert calls["uploaded"] == b"local-pdf-payload"
+        assert calls["year"] == 2024
+        assert calls["pipeline"][1]["offline"] is True
+        assert calls["pipeline"][1]["skip_claims"] is True
+        assert calls["reports"] == (run_id, ("pdf", "xlsx", "html"))
+        assert set(result["reports"]) == {"pdf", "xlsx", "html"}
+        assert len(progress) == 3
+    finally:
+        import shutil
+        shutil.rmtree(run_root, ignore_errors=True)
+
+
+def test_web_upload_rejects_duplicate_names_before_creating_run():
+    """无效上传在验证失败时不应留下半成品运行目录。"""
+    import shutil
+    import pytest
+    from src.web import ROOT, run_uploaded_reports
+
+    run_id = "pytest_web_upload_duplicate"
+    run_root = ROOT / "runs" / run_id
+    shutil.rmtree(run_root, ignore_errors=True)
+
+    class Upload:
+        def __init__(self, name):
+            self.name = name
+
+        def getvalue(self):
+            return b"file"
+
+    with pytest.raises(ValueError, match="文件名重复"):
+        run_uploaded_reports(
+            [Upload("Report.pdf"), Upload("report.PDF")],
+            run_id=run_id, default_year=2024, offline=True,
+        )
+    assert not run_root.exists()
+
+
+def test_web_upload_unknown_file_still_builds_report(monkeypatch):
+    """上传「任意 PDF/DOCX」而一份年报都没识别出来时不得报错，仍要产出三种报告。
+
+    异常什么结果都不给，用户无从判断；正确行为是照常跑完流程，产出一份
+    "未识别到可核查字段"的说明性报告。
+    """
+    import shutil
+    from src import ingest, pipeline, report
+    from src.web import ROOT, run_uploaded_reports
+
+    run_id = "pytest_web_upload_no_fields"
+    run_root = ROOT / "runs" / run_id
+    shutil.rmtree(run_root, ignore_errors=True)
+    seen = {}
+
+    class Upload:
+        name = "随便一份.pdf"
+
+        def getvalue(self):
+            return b"payload"
+
+    monkeypatch.setattr(ingest, "process_folder",
+                        lambda folder, out_dir, default_year: {
+                            "structured_files": [], "claims_path": None})
+    monkeypatch.setattr(pipeline, "run", lambda *a, **k: seen.update(k))
+    monkeypatch.setattr(report, "build_all",
+                        lambda r, f: {x: f"runs/{r}/report.{x}" for x in f})
+
+    try:
+        out = run_uploaded_reports([Upload()], run_id=run_id, default_year=2024, offline=True)
+        assert set(out["reports"]) == {"pdf", "xlsx", "html"}
+        assert seen, "没识别出年报也必须跑完流程再出报告"
+        assert seen["data_dir_override"].replace("\\", "/") == f"runs/{run_id}/ingested"
+    finally:
+        shutil.rmtree(run_root, ignore_errors=True)
+
+
+def test_ingest_without_annual_never_falls_back_to_shared_data(monkeypatch):
+    """CLI 文件夹入口没识别出年报时，必须仍指向本轮 ingested 目录。
+
+    若回落成 None，pipeline 会去读共享的 data/structured/（旧基线数据），
+    产出一份与本次上传文件毫无关系、还看着"很正常"的报告——比空报告更误导人。
+    """
+    from src import ingest
+    import src.pipeline as P
+
+    seen = {}
+    monkeypatch.setattr(ingest, "process_folder",
+                        lambda folder, out_dir, default_year, report_period: {
+                            "files": 1, "log": [], "structured_files": [],
+                            "claims_path": None, "claims_count": 0})
+    monkeypatch.setattr(P, "run", lambda *a, **k: seen.update(k))
+
+    ingest.ingest("does-not-matter", "pytest_ingest_no_fields", offline=True)
+    assert seen["data_dir_override"].replace("\\", "/") == "runs/pytest_ingest_no_fields/ingested"
+    assert seen["claims_override"] is None and seen["skip_claims"] is True
+
+
 def test_csi_includes_research_dimension():
-    """C研 结果必须并入 CSI——《项目思路》公式里 C研 占 0.20 权重。
+    """C研 结果必须并入 CSI，并按 rules.yaml 的当前维度权重计算。
 
     此前 C研 的 FAIL 不进 CSI，会出现"查出 2 条研报错误、CSI 却仍是满分"的虚高。
     """
@@ -828,6 +965,65 @@ def test_csi_includes_research_dimension():
     assert dims["C研"]["rules_applicable"] == 2, "C研 结果未并入 CSI"
     assert dims["C研"]["score"] == 0.5
     assert out["csi"]["csi"] < 100, "研报有 FAIL 时 CSI 不应满分"
+
+
+def test_csi_grade_boundaries():
+    """等级按接口的 90/75/60/40 分边界映射，低于40为E。"""
+    from src.rules_engine import compute_csi
+
+    cfg = {"version": "1.0", "dimensions": {"C内": {"weight": 1.0}}}
+    for score, expected in ((90.0, "A"), (89.5, "B"), (75.0, "B"),
+                            (74.5, "C"), (60.0, "C"), (59.5, "D"),
+                            (40.0, "D"), (39.5, "E")):
+        passes = int(score)
+        reviews = int((score - passes) * 2)
+        results = ([{"dimension": "C内", "status": "PASS"}] * passes
+                   + [{"dimension": "C内", "status": "REVIEW"}] * reviews
+                   + [{"dimension": "C内", "status": "FAIL"}] * (100 - passes - reviews))
+        got = compute_csi(results, cfg)
+        assert got["csi"] == score, (score, got["csi"])
+        assert got["grade"] == expected, (score, got["grade"])
+
+
+def _provisional_records():
+    return [
+        {"item_code": "TOTAL_ASSETS", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "1000.00", "unit_raw": "元", "raw_text": "资产总计 1000.00"},
+        {"item_code": "TOTAL_LIAB", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "400.00", "unit_raw": "元", "raw_text": "负债合计 400.00"},
+        {"item_code": "TOTAL_EQUITY", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "600.00", "unit_raw": "元", "raw_text": "所有者权益合计 600.00"},
+    ]
+
+
+def test_csi_weights_come_from_central_scoring_config():
+    """CSI 权重必须来自 rules.yaml 的 scoring 段（集中开关），weights_used 与配置一致。"""
+    import yaml
+    from src.pipeline import ROOT
+    from src.rules_engine import run_rules
+
+    cfg = yaml.safe_load((ROOT / "rules" / "rules.yaml").read_text(encoding="utf-8"))
+    expected = {k: v["weight"] for k, v in cfg["scoring"]["dimensions"].items()}
+
+    run_rules(_provisional_records(), "pytest_scoring_cfg")
+    csi = json.loads((ROOT / "runs" / "pytest_scoring_cfg" / "rules" / "csi.json")
+                     .read_text(encoding="utf-8"))
+    assert csi["weights_used"] == expected, \
+        "weights_used 未取自集中在 rules.yaml 的 scoring 配置"
+
+
+def test_csi_json_marks_provisional():
+    """口径未获裁定前，csi.json 必须带 provisional 标记与生效口径来源（profile）。"""
+    import yaml
+    from src.pipeline import ROOT
+    from src.rules_engine import run_rules
+
+    cfg = yaml.safe_load((ROOT / "rules" / "rules.yaml").read_text(encoding="utf-8"))
+    run_rules(_provisional_records(), "pytest_scoring_cfg")
+    csi = json.loads((ROOT / "runs" / "pytest_scoring_cfg" / "rules" / "csi.json")
+                     .read_text(encoding="utf-8"))
+    assert csi["provisional"] is True, "csi.json 缺少 provisional 标记"
+    assert csi["profile"] == cfg["scoring"]["profile"] == "default-provisional"
 
 
 # ---------- I：异常原因解释 ----------
@@ -968,3 +1164,38 @@ def test_reproducible_digest_ignores_run_id():
     (d / "c.json").write_text('{"run_id":"X","v":[1,3]}', encoding="utf-8")
     assert _digest(d / "a.json") == _digest(d / "b.json")
     assert _digest(d / "a.json") != _digest(d / "c.json")
+
+
+def test_save_manifest_marks_completed(tmp_path, monkeypatch):
+    """正常结束落盘后应把 RUNNING 状态收敛为 COMPLETED。"""
+    import src.manifest as manifest
+
+    monkeypatch.setattr(manifest, "ROOT", tmp_path)
+    monkeypatch.setattr(manifest, "summarize_calls", lambda *_: {
+        "api_ok": 0, "cache_hit": 0, "cache_miss": 0, "failed": 0, "total": 0,
+    })
+    data = {"run_id": "manifest_test", "started_at": "2026-10-12T00:00:00+08:00",
+            "status": "RUNNING"}
+    path = manifest.save_manifest("manifest_test", data)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["status"] == "COMPLETED"
+    assert saved["finished_at"]
+
+
+def test_error_fixture_meets_interface_contract():
+    """植错研报 fixture 有 8–10 条、五类各至少两条，且 CSV 列与契约一致。"""
+    import csv
+    from tools.build_error_case_fixture import CASES, validate_cases
+    from src.pipeline import ROOT
+
+    assert len(CASES) == 10
+    assert set(validate_cases(CASES).values()) == {2}
+    path = ROOT / "data" / "demo" / "研报错误测试案例_契约核验版.csv"
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert list(rows[0]) == ["claim_id", "错误句", "错误类型", "标准答案", "证据应在页码", "备注"]
+    assert len(rows) == 10
+    assert {r["错误类型"] for r in rows} == {
+        "UNIT_SCALE", "PERIOD_MISMATCH", "SCOPE_MIXED", "VALUE_ERROR", "SIGN_ERROR",
+    }
+    assert len({r["claim_id"] for r in rows}) == 10

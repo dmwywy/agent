@@ -273,17 +273,31 @@ def scan_rows(numbered: list[tuple[int, str]]) -> list[tuple[str, str | None, st
     return rows
 
 
-def extract(src_path: Path, year: int) -> tuple[list[dict], dict]:
+def _period_context(year: int, report_period: str = "annual") -> dict:
+    """返回报告期间的时期/时点标签；年中累计值不得伪装为全年 FY。"""
+    if report_period == "annual":
+        return {"flow_current": str(year), "flow_previous": str(year - 1),
+                "flow_type": "FY", "balance_current": f"{year}-12-31",
+                "balance_previous": f"{year - 1}-12-31", "report_period": report_period}
+    if report_period == "half_year":
+        return {"flow_current": f"{year}-H1", "flow_previous": f"{year - 1}-H1",
+                "flow_type": "YTD", "balance_current": f"{year}-06-30",
+                "balance_previous": f"{year - 1}-12-31", "report_period": report_period}
+    raise ValueError(f"不支持的报告期间: {report_period}")
+
+
+def extract(src_path: Path, year: int, report_period: str = "annual") -> tuple[list[dict], dict]:
     """按扩展名分派：PDF 走文本行扫描，docx 走 Word 表格解析。
 
     为什么要支持 docx：现场测试时评委给的材料可能是 Word 文件（.doc/.docx），
     而 pdfplumber 只吃 PDF。Word 表格有明确的单元格边界，解析反而比 PDF 更稳。
     """
+    period_ctx = _period_context(year, report_period)
     suffix = src_path.suffix.lower()
     if suffix == ".pdf":
-        return _extract_pdf(src_path, year)
+        return _extract_pdf(src_path, year, period_ctx)
     if suffix in (".docx", ".docm"):
-        return _extract_docx(src_path, year)
+        return _extract_docx(src_path, year, period_ctx)
     if suffix == ".doc":
         raise SystemExit(
             f"不支持旧版 .doc 二进制格式：{src_path.name}\n"
@@ -360,10 +374,15 @@ def _emit(records, chunk_index, seen, *, code, raw, value, period, ptype,
         "locator": locator, "chunk_id": chunk_id, "raw_text": raw_text,
         "source_hash": src_hash, "parse_status": "OK", "confidence": 1.0,
     }
+    page_match = re.search(r"PDF第(\d+)页", locator)
+    if page_match:
+        rec["page"] = int(page_match.group(1))
     if note_ref:
         rec["note_ref"] = note_ref
-    chunk_index.setdefault(chunk_id, {"locator": locator, "source": src_name,
-                                      "chars": len(raw_text)})
+    chunk_meta = {"locator": locator, "source": src_name, "chars": len(raw_text)}
+    if page_match:
+        chunk_meta["page"] = int(page_match.group(1))
+    chunk_index.setdefault(chunk_id, chunk_meta)
     records.append(rec)
 
 
@@ -378,8 +397,11 @@ def _scan_segment_table(rows):
     """
     out, section, cols_ok = [], None, False
     for ri, cells in enumerate(rows):
-        if len(cells) == 1:
-            section = SEGMENT_SECTIONS.get(_squash(cells[0]))
+        # PDF 表格中小节标题常占整行，但空单元格仍保留在数组里；
+        # 先滤掉空格，兼容 Word 的单格标题与 PDF 的跨列标题。
+        nonempty = [c for c in cells if c and c.strip()]
+        if len(nonempty) == 1:
+            section = SEGMENT_SECTIONS.get(_squash(nonempty[0]))
             cols_ok = False
             continue
         if section is None:
@@ -436,12 +458,35 @@ def _scan_equity_table(rows, eq_year):
     return out, eq_year
 
 
-def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
+def _pdf_page_tables(page):
+    """提取 PDF 页面的表格。"""
+    # 年报 PDF 的表格可能没有显式边框；pdfplumber 默认策略结合文本边
+    # 可抓到主表/分部表/权益表。调用方对行列结构做严格检查，不依赖推测列。
+    return page.extract_tables()
+
+
+def _pdf_table_rows(table):
+    """把 pdfplumber 的单元格统一成字符串，保留空列以确保列号语义。"""
+    return [[(cell or "").replace("\n", " ").strip() for cell in row]
+            for row in table]
+
+
+def _pdf_statement_heading(text: str) -> str | None:
+    """PDF 的报表标题可能单独成行，也可能与页眉文本相连。"""
+    flat = _squash(text)
+    for title, stmt in CONSOLIDATED_TITLES.items():
+        if flat == title or flat.startswith(title):
+            return stmt
+    return None
+
+
+def _extract_docx(src_path: Path, year: int, period_ctx: dict | None = None) -> tuple[list[dict], dict]:
     """从 Word 文档抽数。与 PDF 版共用同一套口径状态机与科目别名表。
 
     定位方式用 locator（章节 + 表序号 + 行号）代替 page：
     docx 是流式文档，没有固定分页，硬编页码等于伪造证据。
     """
+    period_ctx = period_ctx or _period_context(year)
     src_hash = sha256_file(src_path)
     xml = zipfile.ZipFile(src_path).read("word/document.xml").decode("utf-8")
     body = xml[xml.find("<w:body>"):]
@@ -459,7 +504,11 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
     eq_state = False                 # 当前是否处于合并所有者权益变动表区间
     eq_year: int | None = None       # 当前权益变动表的年度（续表沿用上一张）
 
-    for m in _BODY_TOKEN_RE.finditer(body):
+    body_tokens = list(_BODY_TOKEN_RE.finditer(body))
+    skip_until = -1
+    for token_index, m in enumerate(body_tokens):
+        if token_index <= skip_until:
+            continue
         frag = m.group(0)
         if frag.startswith("<w:tbl>"):
             table_no += 1
@@ -470,7 +519,7 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
                 seg_pending = False
                 for code, value, raw_text, row_no, label in _scan_segment_table(rows):
                     _emit(records, chunk_index, seen, code=code, raw=label,
-                          value=value, period=str(year), ptype="FY",
+                          value=value, period=period_ctx["flow_current"], ptype=period_ctx["flow_type"],
                           statement="MDNA",
                           locator=f"第三节 主营业务分部表 / 表#{table_no} / 第{row_no}行",
                           chunk_id=f"s{table_no:03d}_r{row_no:02d}", raw_text=raw_text,
@@ -478,7 +527,7 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
                 continue
 
             # 合并所有者权益变动表（第十节）
-            if eq_state:
+            if eq_state and period_ctx["report_period"] == "annual":
                 eq_rows, eq_year = _scan_equity_table(rows, eq_year)
                 for code, value, period, ptype, raw_text, row_no, label in eq_rows:
                     _emit(records, chunk_index, seen, code=code, raw=label,
@@ -498,12 +547,14 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
                         continue
                     locator = f"{section}（附注）/ {sub} / 表#{table_no} / 第{ri + 1}行"
                     chunk_id = f"n{table_no:03d}_r{ri + 1:02d}"
-                    for cols, period in ((cur_cols, year), (prev_cols, year - 1)):
+                    for cols, period, balance_period in (
+                            (cur_cols, year, period_ctx["balance_current"]),
+                            (prev_cols, year - 1, period_ctx["balance_previous"])):
                         for code, ci in cols.items():
                             if ci >= len(cells) or not _CELL_VALUE_RE.match(cells[ci].strip()):
                                 continue
                             _emit(records, chunk_index, seen, code=code, raw=cells[0].strip(),
-                                  value=cells[ci].strip(), period=f"{period}-12-31",
+                                  value=cells[ci].strip(), period=balance_period,
                                   ptype="BAL_END" if period == year else "BAL_BEG",
                                   statement="NOTE", locator=locator, chunk_id=chunk_id,
                                   raw_text=" | ".join(cells), src_name=src_path.name,
@@ -525,16 +576,19 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
                     chunk_index.setdefault(chunk_id, {
                         "locator": locator, "source": src_path.name,
                         "chars": len(" ".join(cells))})
-                    for value, period in zip(vals, (year, year - 1)):
+                    note_period_values = list(zip(vals, (year, year - 1)))
+                    if period_ctx["report_period"] == "half_year" and spec["period"] != "BAL":
+                        note_period_values = note_period_values[:1]
+                    for value, period in note_period_values:
                         if (code, str(period)) in seen:
                             continue
                         seen.add((code, str(period)))
                         if spec["period"] == "BAL":
                             ptype = "BAL_END" if period == year else "BAL_BEG"
-                            pval = f"{period}-12-31"
+                            pval = period_ctx["balance_current"] if period == year else period_ctx["balance_previous"]
                         else:
-                            ptype = "FY"          # 时期数：本期/上期金额
-                            pval = str(period)
+                            ptype = period_ctx["flow_type"]
+                            pval = period_ctx["flow_current"] if period == year else period_ctx["flow_previous"]
                         records.append({
                             "item_code": code, "item_raw": cells[0].strip(),
                             "value": value.replace(",", ""), "unit_raw": "元",
@@ -562,7 +616,10 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
                 chunk_index.setdefault(chunk_id, {
                     "locator": locator, "source": src_path.name,
                     "chars": len(" ".join(cells))})
-                for value, period in zip(values, (year, year - 1)):
+                statement_period_values = list(zip(values, (year, year - 1)))
+                if period_ctx["report_period"] == "half_year" and not period_type.startswith("BAL"):
+                    statement_period_values = statement_period_values[:1]
+                for value, period in statement_period_values:
                     if (item_code, str(period)) in seen:
                         continue
                     ptype = period_type
@@ -575,7 +632,9 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
                         "value": value.replace(",", ""),
                         "unit_raw": "元",
                         "period_type": ptype,
-                        "period": f"{period}-12-31" if period_type.startswith("BAL") else str(period),
+                        "period": (period_ctx["balance_current"] if period == year else period_ctx["balance_previous"])
+                                  if period_type.startswith("BAL") else
+                                  (period_ctx["flow_current"] if period == year else period_ctx["flow_previous"]),
                         "scope": "CONSOLIDATED",
                         "statement": stmt,
                         "locator": locator,          # docx 源的定位凭据（§2.1 v1.3）
@@ -587,6 +646,31 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
                     })
         else:
             text = _strip_tags(frag)
+            # 2025 年报 DOCX 的合并权益比较期末行被展平成 16 个连续段落：
+            # 第 1 个是行名，后 15 个按原列序保留（空列也是空段落）。只有
+            # 序列长度、标签和每格金额格式都严格吻合时才抽取；不解析其他段落行。
+            if (eq_state and period_ctx["report_period"] == "annual"
+                    and _eq_row_targets(text) is EQ_ROWS_END):
+                following = body_tokens[token_index + 1:token_index + EQ_COL_COUNT]
+                if (len(following) == EQ_COL_COUNT - 1
+                        and all(t.group(0).startswith("<w:p") for t in following)):
+                    values = [_strip_tags(t.group(0)).strip() for t in following]
+                    if all(not v or _CELL_VALUE_RE.match(v) for v in values):
+                        cells = [text.strip(), *values]
+                        raw_text = " | ".join(cells)
+                        locator = (f"{EQ_HEADING} {year - 1}年度 / "
+                                   "DOCX段落化比较期末行")
+                        chunk_id = f"eqp{year - 1}_year_end"
+                        for col, code in EQ_ROWS_END.items():
+                            value = cells[EQ_COLUMNS[col]].strip()
+                            if _CELL_VALUE_RE.match(value):
+                                _emit(records, chunk_index, seen, code=code,
+                                      raw=text.strip(), value=value,
+                                      period=f"{year - 1}-12-31", ptype="BAL_END",
+                                      statement="EQ", locator=locator,
+                                      chunk_id=chunk_id, raw_text=raw_text,
+                                      src_name=src_path.name, src_hash=src_hash)
+                        skip_until = token_index + EQ_COL_COUNT - 1
             if SEGMENT_HEADING_RE.search(text):
                 seg_pending = True    # 下一张表即主营业务分部表
             if text in CONSOLIDATED_TITLES:
@@ -621,27 +705,108 @@ def _extract_docx(src_path: Path, year: int) -> tuple[list[dict], dict]:
     return records, chunk_index
 
 
-def _extract_pdf(pdf_path: Path, year: int) -> tuple[list[dict], dict]:
-    """状态机逐页扫描：只在"合并"口径的表内抽数，遇到母公司报表即切断。"""
+def _extract_pdf(pdf_path: Path, year: int, period_ctx: dict | None = None) -> tuple[list[dict], dict]:
+    """解析 PDF 中的合并主表、分部表、权益变动表及现金流量表补充资料。"""
+    period_ctx = period_ctx or _period_context(year)
     src_hash = sha256_file(pdf_path)
     records: list[dict] = []
     chunk_index: dict[str, dict] = {}
     seen: set[tuple[str, str]] = set()      # (item_code, period) 去重
 
-    # 逐页扫描，按"当前处于哪张合并主表"切分成段落。
-    # 段落跨页保留（表标题只在起始页出现），遇到母公司报表标题即结束当前段落。
+    # 逐页扫描；正文表题可从页眉/表头识别，母公司报表标题会停止主表状态。
     segments: list[dict] = []
     current_stmt: str | None = None
+    eq_year: int | None = None
+    in_equity_section = False
+    supplement_pages_remaining = 0
     with pdfplumber.open(pdf_path) as pdf:
         for page_no, page in enumerate(pdf.pages, start=1):
-            for ln in (page.extract_text() or "").splitlines():
-                ln = ln.strip()
-                if not ln:
+            page_text = page.extract_text() or ""
+            page_lines = [ln.strip() for ln in page_text.splitlines() if ln.strip()]
+            flat_page = _squash(page_text)
+            if "现金流量表补充资料" in flat_page or "金流量表补充资料" in flat_page:
+                supplement_pages_remaining = 2
+            if "合并所有者权益变动表" in flat_page:
+                in_equity_section = True
+                eq_year = None
+            elif "母公司所有者权益变动表" in flat_page:
+                in_equity_section = False
+                eq_year = None
+            page_tables = _pdf_page_tables(page)
+            # MD&A 分部表：标题、列头与数据可能位于同一张表格中；以既有
+            # 小节/列头/数据行结构识别，不依赖页码或该段的 OCR 文本顺序。
+            if any(SEGMENT_HEADING_RE.search(ln) for ln in page_lines):
+                for ti, table in enumerate(page_tables, start=1):
+                    rows = _pdf_table_rows(table)
+                    for code, value, raw_text, row_no, label in _scan_segment_table(rows):
+                        locator = f"PDF第{page_no}页 / 表#{ti} / 第{row_no}行"
+                        chunk_id = f"p{page_no:03d}_t{ti:02d}_r{row_no:02d}"
+                        _emit(records, chunk_index, seen, code=code, raw=label,
+                              value=value, period=period_ctx["flow_current"], ptype=period_ctx["flow_type"], statement="MDNA",
+                              locator=locator, chunk_id=chunk_id, raw_text=raw_text,
+                              src_name=pdf_path.name, src_hash=src_hash)
+
+            # 合并权益变动表常有 16 列数据表，续页也可能出现新的年度表头。
+            # PDF 页面分开的续表沿用当前年度；列数不符的表由扫描器跳过。
+            for ti, table in enumerate(page_tables, start=1):
+                rows = _pdf_table_rows(table)
+                if not rows:
                     continue
-                if ln in CONSOLIDATED_TITLES:
-                    current_stmt = CONSOLIDATED_TITLES[ln]
+                is_eq_table = in_equity_section and any(
+                    len(r) == EQ_COL_COUNT and _squash(r[0]).endswith(("本期期末余额", "本年期初余额"))
+                    for r in rows)
+                if is_eq_table and period_ctx["report_period"] == "annual":
+                    eq_rows, eq_year = _scan_equity_table(rows, eq_year)
+                    for code, value, period, ptype, raw_text, row_no, label in eq_rows:
+                        locator = f"合并所有者权益变动表 {eq_year}年度 / PDF第{page_no}页 / 表#{ti} / 第{row_no}行"
+                        chunk_id = f"p{page_no:03d}_t{ti:02d}_r{row_no:02d}"
+                        _emit(records, chunk_index, seen, code=code, raw=label,
+                              value=value, period=period, ptype=ptype, statement="EQ",
+                              locator=locator, chunk_id=chunk_id, raw_text=raw_text,
+                              src_name=pdf_path.name, src_hash=src_hash)
+
+            # 现金流量表补充资料小节通常是 3 列表格：项目、本期金额、上期金额。
+            # 只有遇到小节标题和明确表头时才取数，空白金额不填 0。
+            if supplement_pages_remaining > 0:
+                spec = NOTE_TARGETS["现金流量表补充资料"]
+                for ti, table in enumerate(page_tables, start=1):
+                    rows = _pdf_table_rows(table)
+                    if not rows or len(rows[0]) < 3:
+                        continue
+                    header = _squash(" ".join(rows[0]))
+                    if not ("本期金额" in header or "本期数" in header) or not ("上期金额" in header or "上期数" in header):
+                        continue
+                    supplement_period_values = ((1, year), (2, year - 1))
+                    if period_ctx["report_period"] == "half_year":
+                        supplement_period_values = supplement_period_values[:1]
+                    for ri, cells in enumerate(rows[1:], start=2):
+                        if len(cells) < 3:
+                            continue
+                        code = _match_note_item(spec, cells[0])
+                        if not code:
+                            continue
+                        for vi, period in supplement_period_values:
+                            value = cells[vi].strip()
+                            if not _CELL_VALUE_RE.match(value):
+                                continue
+                            _emit(records, chunk_index, seen, code=code, raw=cells[0],
+                                  value=value, period=period_ctx["flow_current"] if period == year else period_ctx["flow_previous"], ptype=period_ctx["flow_type"], statement="NOTE",
+                                  locator=f"现金流量表补充资料 / PDF第{page_no}页 / 表#{ti} / 第{ri}行",
+                                  chunk_id=f"p{page_no:03d}_t{ti:02d}_r{ri:02d}",
+                                  raw_text=" | ".join(cells), src_name=pdf_path.name,
+                                  src_hash=src_hash)
+                supplement_pages_remaining -= 1
+
+            for ln in page_lines:
+                ln = ln.strip()
+                stmt_heading = _pdf_statement_heading(ln)
+                if stmt_heading:
+                    current_stmt = stmt_heading
                     segments.append({"stmt": current_stmt, "lines": []})
-                elif ln in CONTEXT_BREAKERS:
+                elif any(_squash(b) in _squash(ln) for b in
+                         ("母公司资产负债表", "母公司利润表", "母公司现金流量表")):
+                    current_stmt = None
+                elif any(_squash(breaker) in _squash(ln) for breaker in CONTEXT_BREAKERS):
                     # 只停止归集，**不清空已收集的行**：
                     # 资产负债表尾部数据正好排在"母公司资产负债表"标题之前
                     current_stmt = None
@@ -661,7 +826,10 @@ def _extract_pdf(pdf_path: Path, year: int) -> tuple[list[dict], dict]:
             chunk_index.setdefault(chunk_id, {
                 "page": page_no, "source": pdf_path.name, "chars": len(label)})
 
-            for value, period in ((cur, year), (prev, year - 1)):
+            statement_period_values = ((cur, year), (prev, year - 1))
+            if period_ctx["report_period"] == "half_year" and not period_type.startswith("BAL"):
+                statement_period_values = statement_period_values[:1]
+            for value, period in statement_period_values:
                 if value is None or (item_code, str(period)) in seen:
                     continue
                 ptype = period_type
@@ -674,13 +842,15 @@ def _extract_pdf(pdf_path: Path, year: int) -> tuple[list[dict], dict]:
                     "item_raw": label,
                     "value": value.replace(",", ""),
                     "unit_raw": "元",
-                    "period_type": ptype,
-                    "period": f"{period}-12-31" if period_type.startswith("BAL") else str(period),
+                    "period_type": (ptype if period_type.startswith("BAL") else period_ctx["flow_type"]),
+                    "period": ((period_ctx["balance_current"] if period == year else period_ctx["balance_previous"])
+                               if period_type.startswith("BAL") else
+                               (period_ctx["flow_current"] if period == year else period_ctx["flow_previous"])),
                     "scope": "CONSOLIDATED",
                     "statement": stmt,
                     "page": page_no,
                     "chunk_id": chunk_id,
-                    "raw_text": label,
+                    "raw_text": " ".join(part for part in (label, cur, prev) if part),
                     "source_hash": src_hash,
                     "parse_status": "OK",
                     "confidence": 1.0,
@@ -694,11 +864,13 @@ def main():
     src.add_argument("--input", help="年报文件（.pdf 或 .docx），按扩展名自动识别")
     src.add_argument("--pdf", help="等同 --input，保留旧参数名")
     ap.add_argument("--year", type=int, required=True)
+    ap.add_argument("--period", choices=("annual", "half_year"), default="annual",
+                    help="报告类型；half_year 将流量标记为 YTD、期末余额标记为 6 月 30 日")
     ap.add_argument("--out", required=True, help="输出文件名前缀，如 贵州茅台_2024")
     args = ap.parse_args()
 
     path = Path(args.input or args.pdf)
-    records, chunk_index = extract(path, args.year)
+    records, chunk_index = extract(path, args.year, args.period)
 
     out_dir = ROOT / "data" / "structured"
     out_dir.mkdir(parents=True, exist_ok=True)

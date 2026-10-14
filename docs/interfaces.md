@@ -1,9 +1,10 @@
 # 接口契约 interfaces.md
 
-**版本：v1.3**
+**版本：v1.4**
 （v1.0 → v1.1：科目归一化的证据改为程序回填，见 §3.1 与 §5.2；
 v1.1 → v1.2：研报引用匹配的证据同样改为程序回填，见 §3.3；
-v1.2 → v1.3：docx 源的定位改用 `locator` 替代 `page`，见 §2.1a；生效日期 2026-10-05）
+v1.2 → v1.3：docx 源的定位改用 `locator` 替代 `page`，见 §2.1a；生效日期 2026-10-05；
+v1.3 → v1.4：`statement` 枚举新增 `MDNA`（第三节 管理层讨论与分析，用于分部数据），见 §2.1[8]；生效日期 2026-10-13）
 
 ## 0. 文档用途与生效方式
 
@@ -103,7 +104,7 @@ v1.2 → v1.3：docx 源的定位改用 `locator` 替代 `page`，见 §2.1a；�
   "period_type": "FY",
   "period": "2025",
   "scope": "CONSOLIDATED",
-  "statement": "INCOME_STATEMENT",
+  "statement": "IS",
   "page": 42,
   "chunk_id": "p042_t2",
   "raw_text": "营业收入 1,023,500.00",
@@ -124,7 +125,7 @@ v1.2 → v1.3：docx 源的定位改用 `locator` 替代 `page`，见 §2.1a；�
 | [5] | `period_type` | enum | 是 | `FY / YTD / BAL_END / BAL_BEG` |
 | [6] | `period` | string | 是 | 如 `2025`、`2025-12-31` |
 | [7] | `scope` | enum | 是 | `CONSOLIDATED / PARENT` |
-| [8] | `statement` | string | 是 | `BS / IS / CF / EQ / NOTE` |
+| [8] | `statement` | string | 是 | `BS / IS / CF / EQ / NOTE / MDNA`（`MDNA` = 第三节 管理层讨论与分析，用于分部数据；其余分别指资产负债表/利润表/现金流量表/所有者权益变动表/附注） |
 | [9] | `page` | int | 见 §2.1a | 页码；PDF 源必填 |
 | [10] | `chunk_id` | string | **是** | 文本片段编号，用于证据反查 |
 | [11] | `raw_text` | string | **是** | 原文片段；用于证据校验 |
@@ -381,10 +382,17 @@ v1.2 → v1.3：docx 源的定位改用 `locator` 替代 `page`，见 §2.1a；�
 
 （2）格式：
 
+> **provisional（临时口径）**：`weights_used` 的唯一来源为 `rules/rules.yaml` 的 `scoring.dimensions`（集中开关，
+> 维度命名/权重/有效规则集一处切换）。该口径**尚未获业务负责人正式裁定**，落盘结果统一带
+> `"provisional": true` 与 `"profile": "default-provisional"`，对外 CSI 一律视为临时口径，不得标为最终分。
+> 四项争议与推荐默认值见 `docs/决策口径对比_provisional.md`。
+
 ```json
 {
   "run_id": "20260929_demo",
   "csi_version": "v1.0",
+  "profile": "default-provisional",
+  "provisional": true,
   "weights_used": {"C内": 0.25, "C间": 0.30, "C期": 0.15, "C附": 0.20, "C研": 0.10},
   "weights_normalized": {"C内": 0.2778, "C间": 0.3333, "C期": 0.1667, "C附": 0.2222, "C研": 0.0},
   "dimensions": {

@@ -233,7 +233,15 @@ def run_rules(records: list[dict], run_id: str, offline: bool = False) -> dict:
     idx = _index(records)
     results: list[dict] = []
 
-    for rule in rules_cfg.get("rules", []):
+    # 有效规则集开关：集中在 rules.yaml 的 scoring.active_rule_ids。
+    # null（缺省）= 执行全部 rules；给出 rule_id 列表则只执行列出的规则。
+    active_ids = (rules_cfg.get("scoring") or {}).get("active_rule_ids")
+    active_rules = rules_cfg.get("rules", [])
+    if active_ids:
+        wanted = set(active_ids)
+        active_rules = [r for r in active_rules if r.get("rule_id") in wanted]
+
+    for rule in active_rules:
         dim = rule.get("dimension", "")
         tol_name = rule.get("tolerance", "MAIN_TABLE")
 
@@ -311,7 +319,7 @@ def run_rules(records: list[dict], run_id: str, offline: bool = False) -> dict:
                                               profiles[tol_name], unit_floor))
 
     # ★ C研 的结果由 src/research_check.py 产出（存在单独的 research_claims.json），
-    #   必须并入 CSI 计算——《项目思路》的公式里 C研 占 0.20 权重，
+    #   必须并入 CSI 计算——rules.yaml 当前给 C研 配置 0.10 权重（最终权重待项目组确认），
     #   不并进来就会出现"有 2 条 FAIL 却显示 C研 不适用"的矛盾。
     research_results = (_read_json(ROOT / "runs" / run_id / "rules" / "research_claims.json")
                         or {}).get("results", [])
@@ -327,13 +335,28 @@ def run_rules(records: list[dict], run_id: str, offline: bool = False) -> dict:
     return {"results": results, "csi": csi}
 
 
+def _dimension_weights(rules_cfg: dict) -> dict:
+    """CSI 维度与权重的**唯一来源**：rules.yaml 的 scoring.dimensions（集中开关）。
+
+    兼容旧写法：无 scoring 段时回退到顶层 dimensions（供单测直接构造 cfg）。
+    改 rules.yaml 的 scoring.dimensions 后重跑即可切换口径，无需改本模块。
+    """
+    scoring = rules_cfg.get("scoring") or {}
+    dims = scoring.get("dimensions") or rules_cfg.get("dimensions") or {}
+    return {k: v.get("weight", 0) for k, v in dims.items()}
+
+
 def compute_csi(results: list[dict], rules_cfg: dict) -> dict:
     """按 interfaces.md §4.5 计算分项指标与综合一致性指数。
 
     得分 = (通过×1 + 待复核×0.5) ÷ 可执行规则数；不适用(NA)不计入分母。
     归一化权重 = 原权重 ÷ Σ(可执行规则数>0 的维度权重)；全不可执行则输出 null。
+    口径未获业务裁定时烙上 provisional 与 profile 标记（集中在 rules.yaml 的 scoring 段）。
     """
-    weights = {k: v.get("weight", 0) for k, v in rules_cfg.get("dimensions", {}).items()}
+    weights = _dimension_weights(rules_cfg)
+    scoring = rules_cfg.get("scoring") or {}
+    marker = {"provisional": bool(scoring.get("provisional", False)),
+              "profile": scoring.get("profile", "unknown")}
     dims: dict[str, dict] = {k: {"rules_applicable": 0, "pass": 0, "fail": 0,
                                  "review": 0, "na": 0, "score": None} for k in weights}
     for r in results:
@@ -361,7 +384,8 @@ def compute_csi(results: list[dict], rules_cfg: dict) -> dict:
         return {"csi_version": rules_cfg["version"], "weights_used": weights,
                 "weights_normalized": norm, "dimensions": dims,
                 "csi": None, "grade": "NA", "grade_label": "不适用",
-                "na_dimensions": sorted(dims), "note": "所有维度均无可执行规则"}
+                "na_dimensions": sorted(dims), "note": "所有维度均无可执行规则",
+                **marker}
 
     csi = round(sum(live[k]["score"] * norm[k] for k in live) * 100, 1)
     for lo, grade, label in ((90, "A", "高度一致"), (75, "B", "基本一致"),
@@ -374,4 +398,5 @@ def compute_csi(results: list[dict], rules_cfg: dict) -> dict:
             "weights_normalized": norm, "dimensions": dims,
             "csi": csi, "grade": grade, "grade_label": label,
             "na_dimensions": sorted(set(dims) - set(live)),
-            "note": "不适用维度的权重已按比例分摊至其余维度"}
+            "note": "不适用维度的权重已按比例分摊至其余维度",
+            **marker}

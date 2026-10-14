@@ -121,6 +121,7 @@ def summarize_calls(run_id: str, since: str | None = None) -> dict:
 
 def save_manifest(run_id: str, m: dict) -> Path:
     m["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    m["status"] = "COMPLETED"
     m["calls"] = summarize_calls(run_id, m.get("started_at"))
     p = ROOT / "runs" / run_id / "manifest.json"
     p.parent.mkdir(parents=True, exist_ok=True)

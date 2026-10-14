@@ -208,6 +208,11 @@ macOS / Linux：
 支持 `.pdf` 与 `.docx` 混放，可多份。报告期优先从**文件名**取 4 位年份，
 取不到用 `--year` 兜底。两者都不像的文件会列在输出里，**不做猜测**。
 
+**任意 PDF / DOCX 都会拿回报告**：一份年报都没识别出来（文件损坏、加密或
+根本不是财报内容）时，程序**不报错、也不回落共享基线数据**——它用本次（空的）
+解析结果跑完流程，产出一份「未识别到可核查字段」的说明性报告（PDF / Excel / HTML）。
+命令行与网页两条入口行为一致。
+
 实测（文件夹内混放年报 docx + 研报 docx）：
 
     扫描到 2 个文件：
@@ -217,15 +222,21 @@ macOS / Linux：
 
     C研 数值比对 FAIL=1  PASS=1
 
+半年报需单独放在一个目录并显式指定期间，避免同一目录中的年报也被按半年口径解释：
+
+    python -m fincheck ingest --from "D:\评委给的半年报材料" --run-id 20261012_h1 --period half_year
+
+半年报的流量本期按 `YTD` 处理；当前抽取器不导入流量比较列和权益变动表，直到用原始半年报核验其列头与期间定位。该模式已接入 CLI，但仍需以比赛指定半年报做字段和值的验收。
+
 **数据隔离**：现场解析结果全部写在 `runs/<run_id>/ingested/` 下，
 **不写**共享的 `data/structured/`。因为 `load_structured` 会把目录下所有
 `*.json` 全读进来，若往共享目录堆文件，两批材料会混在一起用。
 
-**桌面文件夹演示（无需仓库预置 `data/`）**：在桌面创建 `财务核查材料`，放入年报和研究报告；指定一个可写的结果目录（例如 `C:\\Users\\<用户名>\\Desktop\\财务核查结果`），运行：
+**桌面文件夹演示（无需仓库预置 `data/`，只上传年报也可运行）**：在桌面创建 `财务核查材料`，放入一份或多份年报 PDF / DOCX。文件名最好包含报告年度；然后运行：
 
     python -m fincheck ingest --from "$env:USERPROFILE\Desktop\财务核查材料" --run-id onsite_demo --report-folder "$env:USERPROFILE\Desktop\财务核查结果"
 
-程序按文件内容识别并解析材料，结果先写入项目的 `runs/onsite_demo/ingested/`，再将本次完整运行目录（PDF、Excel、HTML 报告，结构化字段、规则结果及日志）复制到 `桌面\财务核查结果\onsite_demo\`。需准备可读取的年报与研究报告；默认在线调用需配置 `.env` 中的 `DEEPSEEK_API_KEY`。`--offline` 只使用匹配缓存，未命中会转人工复核。每次运行用不同 `--run-id`，避免覆盖既有结果。
+程序按文件内容识别并解析年报，结果先写入项目的 `runs/onsite_demo/ingested/`，再将本次完整运行目录（PDF、Excel、HTML 报告，结构化字段、规则结果及日志）复制到桌面结果目录。年报单独运行时会跳过研报匹配，不会拿仓库 demo 研报冒充本次输入。默认在线调用需配置 `.env` 中的 `DEEPSEEK_API_KEY`；`--offline` 不联网，未命中缓存的语义任务转人工复核，规则核查和报告仍会生成。每次运行用不同 `--run-id`，避免覆盖既有结果。
 
 ### 8. 核查报告（PDF / Excel / 网页）
 
@@ -252,7 +263,10 @@ macOS / Linux：
 
     streamlit run app.py
 
-浏览器打开后，左侧选运行编号，右侧五个页签：
+浏览器打开后，可在页面上方拖入或选择年报 PDF / DOCX，填写没有写在文件名中的报告年度，选择离线或在线模式，然后点击“开始核查并生成报告”。完成后页面自动切换到本次运行，可查看异常、CSI、字段和规则明细，并下载 PDF、Excel、HTML。也可以在左侧选择历史运行编号：
+
+上传**任意** PDF / DOCX 都会返回一份报告：识别不出年报时同样生成三种报告，
+只是内容为「未提取到字段记录 / 未计算 CSI」，并在报告中说明原因，而不是弹出报错。
 
 | 页签 | 内容 |
 |---|---|
@@ -264,6 +278,14 @@ macOS / Linux：
 
 界面**只读** `runs/<run_id>/` 下的产物，不重跑流程、不调模型——展示与计算分离，
 看到的永远是已落盘、可复核的结果。
+
+**本轮验收（2026-10-13）**：已用真实浏览器经**原生文件对话框**上传
+`贵州茅台酒股份有限公司2024年年度报告.pdf`，运行 `web_20261013_224837_438aa4`：
+`manifest.json` 状态 `COMPLETED`、`calls.api_ok=0`（离线，未出站）；`rules/csi.json`
+CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provisional"`；
+产出提取字段 117、规则结果 37、异常 0，以及 `uploaded/*.pdf`、`manifest.json`、
+`ingested/*.json`、`rules/results.json`、`rules/csi.json`、`report.pdf/xlsx/html`、
+`llm/mappings.json`、`logs.jsonl` 共 **11 项**产物齐备。网页展示与下载均只读该次运行产物。
 
 ### 10. 质量核算（提取准确率 / 可复现性）
 
@@ -308,6 +330,13 @@ macOS / Linux：
 
     python -m pytest -q
 
+**当前状态（2026-10-13）**：收集 **72** 项 / **全部通过（72 passed / 0 failed）**。
+此前唯一红项 `test_web_app_handles_run_without_report` 已修复：`app.py` 报告下载页
+原先把「有没有报告」的判断与提示**一并**放进 `if tab5.open:` 惰性页签渲染门控，
+未打开该页签时 `streamlit.testing` 的 AppTest 取不到该提示文案；现改为只对
+「读报告字节、建下载按钮」这一半门控，判断与提示始终渲染（未打开页签时不在浏览器上显示）。
+`test_netguard_installed`、`test_web_app_renders_without_exception` 实测**通过**。
+
 ---
 
 ## 五之二、数据分两层：哪些要自备，哪些 clone 就有
@@ -326,6 +355,7 @@ macOS / Linux：
 这时用工具参数传你自己的本地路径即可，**代码里没有硬编码材料路径**：
 
     python tools/extract_fields.py --pdf "<你的路径>/2024年年度报告.pdf" --year 2024 --out 贵州茅台_2024
+    python tools/extract_fields.py --input "<你的路径>/2026年半年度报告.pdf" --year 2026 --period half_year --out 贵州茅台_2026H1
     python tools/extract_claims.py --docx "<你的路径>/模拟研究报告.docx" --tag 2024 --out 研报claims_2024
 
 解析结果写回 `data/structured/` 与 `data/demo/`；确认无误后再提交给全组。
@@ -347,8 +377,19 @@ macOS / Linux：
 
     cache_key = sha256(提示词内容 + 模型标识 + 推理参数 + 输入数据)
 
-其中**不包含 API Key、不包含时间戳、不包含机器名**。因此同一份输入在不同机器、不同使用者
-手中命中同一份缓存，输出结果一致。
+其中**推理参数**固定为 `temperature=0`、`top_p=1`、`max_tokens=8000`、`stream=false`、
+`thinking={"type":"disabled"}`（见 `src/llm.py` 的 `PARAMS` 与 `THINKING`；关闭深度思考，
+避免推理 token 占满 `max_tokens` 预算导致正文为空）。缓存键**不包含 API Key、不包含时间戳、
+不包含机器名**。因此同一份输入在不同机器、不同使用者手中命中同一份缓存，输出结果一致。
+
+### 人工植错研报回归样例
+
+运行以下命令可生成一份明确标注为竞赛模拟材料的研报摘录、10 条 claims、核验真值 JSON 和契约 CSV 错误清单：
+
+    python tools/build_error_case_fixture.py
+
+错误类别按接口冻结枚举各 2 条（单位、期间、口径、数值、符号）。该 fixture 用于契约及回归测试；
+收到的原始 15 条 DOCX 清单另存为转录草稿，因若干标准答案方向与源文冲突，不能与本 fixture 混作已确认真值。
 
 ### 操作步骤
 
@@ -378,35 +419,62 @@ macOS / Linux：
     ├── .env                  凭据文件，不提交
     ├── .env.example          变量模板，提交
     ├── .gitignore
-    ├── requirements.txt
-    ├── README.md
+    ├── requirements.txt      锁定依赖
+    ├── README.md             运行说明
+    ├── app.py                网页入口（Streamlit）
     ├── check_key.py          密钥配置诊断
     ├── test.py               最小调用测试
     ├── testcontract.py       契约自检
     ├── test_schema_roundtrip.py  返回结构与证据校验
+    ├── test_tasks.py         任务 / 提示词 / 校验测试
+    ├── fincheck/
+    │   └── __main__.py       CLI 入口：run / ingest / report 与运行摘要
+    ├── configs/
+    │   ├── demo.yaml         初赛运行配置
+    │   └── model.yaml        模型与推理参数声明
     ├── docs/
-    │   ├── model_plan.md     模型调用方案
     │   ├── interfaces.md     接口契约
+    │   ├── model_adapter_contract.md  模型接口确认版
+    │   ├── model_plan.md / model_plan_simple.md  模型调用方案
+    │   ├── third_party.md    第三方依赖与模型清单
+    │   ├── 决赛交付与模块映射.md  模块映射与缺口说明
     │   └── evidence/         验证与演练截图
-    ├── prompts/
-    │   └── match_item.txt    科目归一化提示词
+    ├── prompts/              5 个提示词（内容哈希写入 manifest）
+    │   ├── match_item.txt    科目归一化
+    │   ├── unit_period.txt   单位 / 期间 / 口径识别
+    │   ├── match_claim.txt   研报引用匹配
+    │   ├── explain_anomaly.txt  异常原因解释
+    │   └── gen_report_text.txt  报告定性文字
     ├── rules/
     │   ├── fields.yaml       字段字典
-    │   ├── rules.yaml        规则配置
+    │   ├── rules.yaml        规则配置（27 条）
     │   └── tolerance.yaml    容差配置
-    ├── src/
+    ├── src/                  16 个模块
     │   ├── llm.py            模型调用闸门（缓存、重试、JSON 强制输出）
     │   ├── errors.py         错误分类与提示
-    │   ├── inputs.py         四类输入构造
-    │   ├── schemas.py        五类返回结构契约
+    │   ├── inputs.py         5 类模型输入构造
+    │   ├── schemas.py        5 类返回结构契约
     │   ├── validators.py     三层校验
+    │   ├── tasks.py          任务级接口：加载提示词→调用→校验→修复重试
     │   ├── netguard.py       联网白名单与离线自检
+    │   ├── pipeline.py       主编排：解析→语义→规则→解释→落盘
+    │   ├── ingest.py         文件夹入口：按内容识别材料
+    │   ├── web.py            网页上传→核查→报告共用编排
+    │   ├── rules_engine.py   五维规则核查 + CSI 计算
+    │   ├── research_check.py C研 研报数值比对
+    │   ├── explain.py        异常原因解释
+    │   ├── report.py         报告生成（PDF / Excel / 网页）
     │   ├── logger.py         事件记录
     │   └── manifest.py       运行清单
-    ├── tools/
-    │   └── check_fields.py   字段字典一致性自检
+    ├── tools/                9 个脚本
+    │   ├── extract_fields.py / extract_claims.py        年报 / 研报抽取
+    │   ├── build_gold_standard.py / check_accuracy.py   标准答案与准确率 E
+    │   ├── check_reproducible.py  可复现性比对
+    │   ├── export_fields.py / check_fields.py           字段字典导出与自检
+    │   └── make_mock.py / build_error_case_fixture.py   离线 mock 与植错 fixture
     ├── data/
-    │   ├── demo/             样例材料
+    │   ├── demo/             样例材料（含研报 claims）
+    │   ├── gold_standard/    人工标准答案
     │   └── structured/       解析输出的结构化数据
     └── runs/
         ├── demo_baseline/    基准运行结果（提交，用于离线复现）
@@ -450,6 +518,8 @@ macOS / Linux：
 2. 离线模式不读取凭据、不发起网络请求，仅读取本地缓存。
 3. 系统不启用网页搜索、网络爬虫与外部数据库检索。
 4. 系统中出现的"本地检索"指本地文件的文本匹配，不产生外部请求。
+5. `src/netguard.py` 的白名单**放行本机回环地址**（`127.0.0.1` / `::1` / `localhost`），
+   以便本地 `streamlit run app.py` 的页面自检与离线自检正常完成，不视为对外出站。
 
 ---
 
@@ -489,10 +559,13 @@ macOS / Linux：
 | pydantic | 见 requirements.txt | PyPI | MIT | 返回结构定义与校验 |
 | python-dotenv | 见 requirements.txt | PyPI | BSD-3-Clause | 读取环境变量文件 |
 | PyYAML | 见 requirements.txt | PyPI | MIT | 读取规则与字段配置 |
-| DeepSeek API | 见 openai 平台文档 | 深度求索开放平台 | 商业服务 | 语义匹配与文字生成 |
+| pdfplumber | 见 requirements.txt | PyPI | MIT | 解析年报 PDF 文本与表格 |
+| pandas | 见 requirements.txt | PyPI | BSD-3-Clause | 网页界面表格与 CSV 导出 |
+| DeepSeek API | 见 openai 平台文档 | 深度求索开放平台 | 商业服务 | 语义匹配与文字生成（请求模型标识 `deepseek-flash`，产品名 DeepSeek-V4.1-Flash） |
 
 使用范围：上述依赖仅用于文档解析、结构校验、配置读取与模型调用。
-第三方模型与商业软件不提交源代码，其名称、版本、调用方式与使用范围见本节与 `docs/model_plan.md`。
+逐项清单（名称、版本、来源、许可证、具体使用范围）见 `docs/third_party.md`。
+第三方模型与商业软件不提交源代码，其名称、版本、调用方式与使用范围见本节、`docs/third_party.md` 与 `docs/model_plan.md`。
 
 ---
 
