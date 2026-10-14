@@ -277,8 +277,10 @@ def run_commentary(records: list[dict], rule_res: list[dict],
                    research_res: list[dict], csi: dict,
                    run_id: str, offline: bool,
                    api_key: str | None = None) -> str:
-    """研报式评价：把程序已算好的经营指标值 + CSI + 异常 + 研报比对喂给模型，
-    让它写一段分析评价（数字白名单校验）。失败/离线不中断，返回状态字符串。"""
+    """研报式评价：把程序已算好的经营指标值 + 派生计算值（同比/比率/亿元/测算）+ CSI
+    + 异常 + 研报比对喂给模型，让它写结构化分析评价（数字白名单校验）。
+    失败/离线不中断，返回状态字符串。"""
+    from src.derived import compute_derived
     from src.inputs import build_gen_commentary, collect_allowed_numbers
     names = {c: n for c, n in _standard_items()}
     metrics = [{
@@ -291,14 +293,20 @@ def run_commentary(records: list[dict], rule_res: list[dict],
     anomalies = [r for r in rule_res if r.get("status") in ("FAIL", "REVIEW")]
     research_fail = [r for r in research_res if r.get("status") == "FAIL"]
 
+    # ★ 派生指标由程序确定性计算（同比/比率/亿元换算/情景测算），
+    #   随 payload 一起喂给模型，其数值自动进入数字白名单；
+    #   模型只负责组织语言，不得自行做任何运算。
+    derived = compute_derived(records)
+
     payload = build_gen_commentary(metrics, csi or {}, anomalies, research_fail,
-                                   (csi or {}).get("grade_label", ""))
+                                   (csi or {}).get("grade_label", ""), derived)
     allowed = collect_allowed_numbers(payload)
     out, status = call_task("gen_commentary", payload, run_id, offline=offline,
                             context={"allowed_numbers": allowed}, api_key=api_key)
     _write_json(run_id, "llm/commentary.json", {
         "run_id": run_id,
         "status": status,
+        "derived_count": len(derived),
         "text": (out or {}).get("text", "") if out else "",
     })
     return status

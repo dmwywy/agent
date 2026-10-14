@@ -131,23 +131,31 @@ def collect_allowed_numbers(obj) -> set[str]:
         s = f"{obj:g}" if isinstance(obj, float) else str(obj)
         nums |= _normalize_number(s)
     elif isinstance(obj, str):
-        for m in re.findall(r"\d[\d,]*\.?\d*", obj):
+        # ★ 必须带符号匹配：程序派生值里有负数（如同比 -1.20），若丢掉负号，
+        #   白名单里只剩 "1.20"，模型照抄 "-1.20" 反而会被误判为编造数字。
+        for m in re.findall(r"[+-]?\d[\d,]*\.?\d*", obj):
             nums |= _normalize_number(m)
     return nums
 
 
+MAX_COMMENT_DERIVED = 40
+
+
 def build_gen_commentary(metrics: list[dict], csi: dict, anomalies: list[dict],
-                         research_fail: list[dict], grade_label: str) -> dict:
+                         research_fail: list[dict], grade_label: str,
+                         derived: list[dict] | None = None) -> dict:
     """研报式评价输入：把所有"程序已算好的确定数字"喂给模型，让它写一段分析评价。
 
     metrics: [{"code","name","period","value"}] —— 程序提取的经营指标值（带确定数值）
     csi:     {"csi": 87.5, "grade": "A", "grade_label": "基本一致"}
     anomalies:   异常清单（含确定 diff / tolerance）
     research_fail: 研报引用比对不一数（含研报值/财报值/差异）
+    derived: src.derived.compute_derived 的产物 —— 同比/比率/亿元换算/情景测算外推
 
     ★ 与 gen_report_text 相反：这里**给数字**，因为用户要的是"根据数据做评价"。
-    但数字一律来自程序产物，模型只负责组织语言、不比对新数；输出再经 collect_allowed_numbers
-    白名单兜底，任何程序没给的数字都会被拦截（src/tasks._post_checks）。
+    但数字一律来自程序产物（提取值 + 派生计算值），模型只负责组织语言、不做任何运算；
+    输出再经 collect_allowed_numbers 白名单兜底，任何程序没给的数字都会被拦截
+    （src/tasks._post_checks）。
     """
     core = [{
         "code": m.get("code", ""),
@@ -173,9 +181,19 @@ def build_gen_commentary(metrics: list[dict], csi: dict, anomalies: list[dict],
         "cause": r.get("cause", ""),
     } for r in research_fail[:MAX_COMMENT_RESEARCH]]
 
+    safe_derived = [{
+        "code": d.get("code", ""),
+        "name": d.get("name", ""),
+        "period": str(d.get("period", "")),
+        "value": str(d.get("value", "")),
+        "unit": d.get("unit", ""),
+        "basis": d.get("basis", ""),
+    } for d in (derived or [])[:MAX_COMMENT_DERIVED]]
+
     return {
         "task": "gen_commentary",
         "metrics": core,
+        "derived": safe_derived,
         "csi": {"csi": csi.get("csi"),
                 "grade": csi.get("grade", ""),
                 "grade_label": grade_label},
@@ -185,6 +203,7 @@ def build_gen_commentary(metrics: list[dict], csi: dict, anomalies: list[dict],
         #   数字白名单据此放行（不得自行推算任何新数）。
         "counts": {
             "metrics": len(core),
+            "derived": len(safe_derived),
             "anomalies": len(safe_anom),
             "research": len(safe_research),
         },

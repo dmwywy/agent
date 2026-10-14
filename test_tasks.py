@@ -191,6 +191,82 @@ def test_all_five_tasks_have_input_builders():
         assert hasattr(inputs, f"build_{task}"), f"缺 build_{task}"
 
 
+# ---------- B：派生计算（程序算数） ----------
+
+_DERIVED_RECS = [
+    {"item_code": "REVENUE", "period": "2024", "value": "1000000000"},
+    {"item_code": "REVENUE", "period": "2023", "value": "800000000"},
+    {"item_code": "OPERATING_COST", "period": "2024", "value": "400000000"},
+    {"item_code": "OPERATING_COST", "period": "2023", "value": "300000000"},
+    {"item_code": "TOTAL_REVENUE", "period": "2024", "value": "1000000000"},
+    {"item_code": "TOTAL_REVENUE", "period": "2023", "value": "800000000"},
+]
+
+
+def test_derived_yoy_ratio_and_scale():
+    """同比、比率、亿元换算必须是程序确定性算出的确切值（对齐研报的对比口径）。"""
+    from src.derived import compute_derived
+    got = {it["code"]: it for it in compute_derived(_DERIVED_RECS)}
+    assert got["SCALE_TOTAL_REVENUE"]["value"] == "10.0"      # 10 亿元
+    assert got["SCALE_TOTAL_REVENUE"]["unit"] == "亿元"
+    assert got["YOY_TOTAL_REVENUE"]["value"] == "25.00"       # (1000-800)/800
+    assert got["RATIO_GROSS"]["value"] == "60.0"              # (10-4)/10
+    assert got["PCTCHG_RATIO_GROSS"]["unit"] == "pcts"
+
+
+def test_derived_skips_missing_inputs():
+    """数据不足的派生项必须缺席，而不是猜一个数出来。"""
+    from src.derived import compute_derived
+    got = {it["code"] for it in compute_derived(
+        [{"item_code": "TOTAL_REVENUE", "period": "2024", "value": "1000000000"}])}
+    assert "SCALE_TOTAL_REVENUE" in got        # 本期够，能换算亿元
+    assert "YOY_TOTAL_REVENUE" not in got      # 没有上期，不得给同比
+    assert "RATIO_GROSS" not in got            # 没有营业成本，不得给毛利率
+
+
+def test_derived_basis_and_name_contain_no_digits():
+    """口径说明/名称/单位不得含阿拉伯数字——否则公式里的常数会污染数字白名单。"""
+    import re
+    from src.derived import compute_derived
+    for it in compute_derived(_DERIVED_RECS):
+        for field in ("name", "unit", "basis"):
+            assert not re.search(r"\d", it[field]), f"{it['code']} 的 {field} 混入了数字"
+
+
+def test_commentary_payload_carries_derived_into_whitelist():
+    """派生值随 payload 进入数字白名单：模型可引用同比/毛利率，但仍不能编造新数。"""
+    from src.derived import compute_derived
+    from src.inputs import build_gen_commentary, collect_allowed_numbers
+    from src.validators import check_no_amounts
+    derived = compute_derived(_DERIVED_RECS)
+    p = build_gen_commentary(
+        [{"code": "TOTAL_REVENUE", "name": "营业总收入", "period": "2024",
+          "value": "1000000000"}],
+        {"csi": 95, "grade": "A", "grade_label": "高度一致"}, [], [], "高度一致", derived)
+    assert p["counts"]["derived"] == len(p["derived"]) == len(derived)
+    allowed = collect_allowed_numbers(p)
+    # 引用程序派生出的同比与毛利率 → 放行
+    assert check_no_amounts("营业总收入 10.0 亿元，同比 25.00%，毛利率 60.0%。", allowed) == []
+    # 程序给负数时，正文写成"同比下降12.50%"（负号在词后、不在数字里）同样放行
+    assert check_no_amounts("归母净利润同比下降 12.50%。", {"-12.50"}) == []
+    assert check_no_amounts("同比 -12.50%", {"-12.50"}) == []
+    # 但程序只给了正数时，把符号写反必须被拦下
+    assert any("未经程序确认" in e
+               for e in check_no_amounts("同比 -25.00%", allowed))
+    # 程序没给过的数字 → 仍必须被拦
+    assert any("未经程序确认" in e
+               for e in check_no_amounts("毛利率高达 88.8%。", allowed))
+
+
+def test_commentary_sections_split():
+    """模型输出的「【小节名】正文」要能拆成标题+正文，供三种报告分子标题渲染。"""
+    from src.report import _commentary_sections
+    secs = _commentary_sections("【核心观点】经营稳健。\n【经营情况】营业总收入…\n续写一句。")
+    assert [s[0] for s in secs] == ["核心观点", "经营情况"]
+    assert secs[0][1] == "经营稳健。"
+    assert secs[1][1] == "营业总收入…续写一句。"
+
+
 # ---------- C：缓存与失败分流 ----------
 
 def test_cache_key_stable_and_sensitive():
@@ -272,6 +348,28 @@ def test_api_key_override_reaches_client(monkeypatch, tmp_path):
     assert seen and seen[0] == "sk-ui-supplied", "表单填的 Key 应传给出站客户端"
     # 缓存键不含凭据：同一输入恒得同一指纹（换 Key 不会让缓存失效）
     assert L.cache_key("提示词 json", {"task": "k"}) == L.cache_key("提示词 json", {"task": "k"})
+
+
+def test_call_task_retry_keeps_api_key(monkeypatch):
+    """校验失败后的修复重试也必须带上网页填的临时 Key——否则重试会静默回落 .env。"""
+    import src.tasks as T
+    seen = []
+
+    def fake_call(prompt, payload, **kw):
+        seen.append(kw.get("api_key"))
+        if len(seen) == 1:                      # 第一次返回越界枚举，触发修复重试
+            return {"items": [{"raw_header": "某科目",
+                               "canonical_item": "NOT_A_CODE", "confidence": 0.9}]}, "API_OK(try=1)"
+        return {"items": []}, "API_OK(try=1)"
+
+    monkeypatch.setattr(T, "call", fake_call)
+    out, status = T.call_task("match_item",
+                              {"headers": ["某科目"], "standard_items": []},
+                              "pytest_retry_key", api_key="sk-ui-supplied")
+
+    assert len(seen) == 2, "越界枚举应触发一次修复重试"
+    assert all(s == "sk-ui-supplied" for s in seen), "重试调用也不得丢掉表单填的 Key"
+    assert out == {"ok": True, "items": [], "reason": ""} and "SCHEMA_FIXED" in status
 
 
 def test_offline_miss_does_not_split_exponentially(monkeypatch):

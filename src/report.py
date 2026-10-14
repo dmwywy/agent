@@ -26,6 +26,34 @@ STATUS_ZH = {"PASS": "通过", "FAIL": "异常", "REVIEW": "需人工复核", "N
 DIM_ZH = {"C内": "表内勾稽", "C间": "表间一致", "C期": "跨期衔接",
           "C附": "主表与附注", "C研": "研报引用"}
 
+# 模型评价段落的固定免责声明（由程序渲染，不由模型产出，避免与报告正文重复）
+COMMENT_DISCLAIMER = ("本段由模型基于程序提取与派生计算的数据生成，仅供参考，"
+                      "不构成投资建议，请结合原始披露人工复核。")
+
+
+def _commentary_sections(text: str) -> list[list[str]]:
+    """把模型输出的「【小节名】正文」多行文本拆成 [[小节名, 正文], ...]。
+
+    对齐券商点评研报的骨架：小节名固定为 核心观点/经营情况/盈利质量/一致性核查/风险提示。
+    不以「【】」开头的行并入上一小节；首行即无标题时按无标题正文处理。
+    """
+    out: list[list[str]] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        head, body = "", line
+        if line.startswith("【") and "】" in line:
+            end = line.index("】")
+            head, body = line[1:end].strip(), line[end + 1:].strip()
+        if head:
+            out.append([head, body])
+        elif out:
+            out[-1][1] += body
+        else:
+            out.append(["", body])
+    return out
+
 
 def _read(p: Path, default=None):
     try:
@@ -242,6 +270,8 @@ def render_pdf(model: dict, path: Path) -> Path:
     h1 = ParagraphStyle("h1", parent=base["Title"], fontName="STSong-Light", fontSize=18)
     h2 = ParagraphStyle("h2", parent=base["Heading2"], fontName="STSong-Light", fontSize=13,
                         spaceBefore=10, spaceAfter=4)
+    h3 = ParagraphStyle("h3", parent=base["Heading3"], fontName="STSong-Light", fontSize=10.5,
+                        spaceBefore=6, spaceAfter=2, textColor=colors.HexColor("#2d6cdf"))
     body = ParagraphStyle("body", parent=base["BodyText"], fontName="STSong-Light",
                           fontSize=9.5, leading=14)
     small = ParagraphStyle("small", parent=body, fontSize=8, textColor=colors.grey)
@@ -346,12 +376,16 @@ def render_pdf(model: dict, path: Path) -> Path:
             story.append(Paragraph(_esc(p), body))
         story.append(Spacer(1, 6))
 
-    # 大模型研报式评价（仅供参考）：数字均来自程序产物，经白名单校验
+    # 大模型研报式评价（仅供参考）：数字均来自程序提取与派生计算，经数字白名单校验
     comment = (model.get("commentary") or {}).get("text", "")
     if comment:
         story.append(Paragraph("大模型经营评价（仅供参考）", h2))
-        story.append(Paragraph(_esc(comment), body))
-        story.append(Paragraph("本段由模型基于程序提取数据生成，仅供参考，不构成投资建议。", small))
+        for sec_head, sec_text in _commentary_sections(comment):
+            if sec_head:
+                story.append(Paragraph(_esc(sec_head), h3))
+            if sec_text:
+                story.append(Paragraph(_esc(sec_text), body))
+        story.append(Paragraph(COMMENT_DISCLAIMER, small))
         story.append(Spacer(1, 6))
 
     # 11/12/13 量化评价
@@ -516,6 +550,7 @@ _HTML = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
  .wrap{{max-width:1100px;margin:0 auto;padding:24px}}
  h1{{font-size:22px;margin:0 0 4px}} h2{{font-size:16px;margin:28px 0 8px;
    border-left:4px solid #2d6cdf;padding-left:8px}}
+ h3{{font-size:14px;margin:14px 0 4px;color:#2d6cdf}}
  .meta{{color:#666;font-size:13px}} .warn{{background:#fff4e5;border:1px solid #ffd08a;
    padding:10px 12px;border-radius:6px;font-size:13px;margin:12px 0}}
  table{{border-collapse:collapse;width:100%;background:#fff;font-size:13px}}
@@ -598,9 +633,14 @@ def render_html(model: dict, path: Path) -> Path:
     # 大模型研报式评价（仅供参考）
     comment = (model.get("commentary") or {}).get("text", "")
     if comment:
-        sections.append("<h2>大模型经营评价（仅供参考）</h2>"
-                        f"<p>{_esc(comment)}</p>"
-                        "<p class=\"warn\">本段由模型基于程序提取数据生成，仅供参考，不构成投资建议。</p>")
+        parts = ["<h2>大模型经营评价（仅供参考）</h2>"]
+        for sec_head, sec_text in _commentary_sections(comment):
+            if sec_head:
+                parts.append(f"<h3>{_esc(sec_head)}</h3>")
+            if sec_text:
+                parts.append(f"<p>{_esc(sec_text)}</p>")
+        parts.append(f'<p class="warn">{_esc(COMMENT_DISCLAIMER)}</p>')
+        sections.append("".join(parts))
 
     csi = model["csi"] or {}
     if csi:

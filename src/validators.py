@@ -34,11 +34,26 @@ def _canon_num(s: str) -> str | None:
 
 
 def check_no_amounts(text: str, allowed_numbers: set[str]) -> list[str]:
-    """★ 报告文字里出现的每个数字，都必须在程序给定的白名单里（数值等价比较）。"""
-    allowed_canon = {c for a in allowed_numbers
-                     if (c := _canon_num(a)) is not None}
+    """★ 报告文字里出现的每个数字，都必须在程序给定的白名单里（数值等价比较）。
+
+    两个放宽点，都是"写法变体"而非新数值：
+     1. 数值等价：95.0 与 95 视为同一个数；
+     2. 正负号解耦：白名单里的 -1.20 同时接受正文写成"同比-1.20%"或"同比下降1.20%"
+        （正号不在数字里、负号可能被写在词后），避免因写法差异误拦；
+        代价是正文把正负号写反不会被拦下——这属于表述错误而非编造数字。
+    """
+    allowed_canon = set()
+    for a in allowed_numbers:
+        c = _canon_num(a)
+        if c is None:
+            continue
+        allowed_canon.add(c)
+        try:                       # 同名数值的绝对值写法（见放宽点 2）
+            allowed_canon.add(format(abs(Decimal(c)), "f"))
+        except InvalidOperation:
+            pass
     errs = []
-    for num in re.findall(r"\d[\d,]*\.?\d*", text):
+    for num in re.findall(r"[+-]?\d[\d,]*\.?\d*", text):
         if _canon_num(num) not in allowed_canon:
             errs.append(f"报告中出现未经程序确认的数字：{num}")
     return errs

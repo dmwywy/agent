@@ -425,7 +425,11 @@ v1.3 → v1.4：`statement` 枚举新增 `MDNA`（第三节 管理层讨论与�
 | [3] | `match_claim` | `claims` + `fields` | **只给科目与期间，不给金额** |
 | [4] | `explain_anomaly` | `rule_id` + `diff_desc` + `chunk_id` + `quote` + `candidates` | 候选原因必须给出 |
 | [5] | `gen_report_text` | `dimensions` + `anomaly_items` + `grade_label` | **不得产出任何数字**，数字由程序在模板填 |
-| [6] | `gen_commentary` | `metrics` + `csi` + `anomalies` + `research` + `counts` | 只引用输入已给的数，禁止自行计算；数字白名单校验 |
+| [6] | `gen_commentary` | `metrics` + `derived` + `csi` + `anomalies` + `research` + `counts` | 只引用输入已给的数，禁止自行计算；数字白名单校验（含派生值） |
+
+**`derived` 派生计算（2026-10-14 新增，`src/derived.py::compute_derived`）**：缺失的对比口径由**程序确定性计算**补齐，不在模型侧产出，随 payload 一并喂给模型。五类前缀：
+`SCALE_` 亿元换算（unit: 亿元，1 位小数）/ `YOY_` 同比增速（%，2 位小数）/ `RATIO_` 比率（毛利率·净利率·归母净利率·营业利润率·资产负债率 %，经营现金流净利润比 倍）/ `PCTCHG_` 比率同比变动（pcts，1 位小数）/ `PROJ_` 按最近一期同比增速线性外推的**情景测算**值（亿元，后缀 `2026E`，非盈利预测）。每条含 `code/name/period/value/unit/basis`，其中 `basis` 为口径说明且**不含任何数字**（防止公式常数污染数字白名单）。派生值经 `inputs.py::collect_allowed_numbers` 进入白名单；`gen_commentary` 正文中的每个数字都必须逐字取自白名单，`tasks.py::_post_checks` 对该任务执行 `validators.check_no_amounts`。
+输出结构固定为对齐券商点评研报的**五小节**（核心观点 / 经营情况 / 盈利质量 / 一致性核查 / 风险提示），小节名不得增删改。
 
 ### 5.2 六类输出（`src/schemas.py`）
 
