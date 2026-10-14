@@ -16,6 +16,8 @@ def run_uploaded_reports(
     run_id: str,
     default_year: int,
     offline: bool,
+    report_period: str = "annual",
+    api_key: str | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> dict:
     """Persist upload payloads, run ingestion/checks, then build all reports.
@@ -26,6 +28,10 @@ def run_uploaded_reports(
     """
     if not _RUN_ID.fullmatch(run_id):
         raise ValueError("运行编号仅允许 1–80 位英文字母、数字、下划线或连字符")
+    # ★ 期间必须显式校验：半年的流量科目按年初至 6-30 累计（YTD）、期末余额取 6-30。
+    #   漏传或传错会让半年报被按年报列头抽取、期间标成全年 FY，结论全错。
+    if report_period not in ("annual", "half_year"):
+        raise ValueError(f"不支持的报告期间：{report_period}（可选 annual / half_year）")
     files = list(uploaded_files)
     if not files:
         raise ValueError("请先选择至少一份年报文件。")
@@ -61,6 +67,7 @@ def run_uploaded_reports(
     progress("识别报告并抽取财务字段")
     ingest_result = process_folder(
         input_dir, run_root / "ingested", default_year=int(default_year),
+        report_period=report_period,
     )
 
     # ★ 一份年报都没识别出来时**不报错**：照常用（空的）本轮 ingested 目录跑完流程，
@@ -73,6 +80,9 @@ def run_uploaded_reports(
         claims_override=(str(claims_path.relative_to(ROOT)) if claims_path else None),
         data_dir_override=str((run_root / "ingested").relative_to(ROOT)),
         skip_claims=claims_path is None,
+        # ★ 使用者可在网页表单临时填入 Key；不填则回落到 .env。
+        #   它只用于构造出站客户端，不进日志/报告/缓存键。
+        api_key=(api_key or None),
     )
 
     progress("生成 PDF、Excel 和网页报告")

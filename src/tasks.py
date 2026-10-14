@@ -64,13 +64,14 @@ def _post_checks(data: dict, task: str, context: dict | None) -> list[str]:
         ok, msg = check_evidence(data["evidence"], chunks)
         if not ok:
             errs.append(msg)
-    if task == "gen_report_text" and ctx.get("allowed_numbers"):
+    if task in ("gen_report_text", "gen_commentary") and ctx.get("allowed_numbers"):
         errs += check_no_amounts(data.get("text", ""), ctx["allowed_numbers"])
     return errs
 
 
 def call_task(task: str, payload: dict, run_id: str, user_id: str = "team",
-              offline: bool = False, context: dict | None = None) -> tuple[dict | None, str]:
+              offline: bool = False, context: dict | None = None,
+              api_key: str | None = None) -> tuple[dict | None, str]:
     """返回 (通过全部校验的结果 dict 或 None, 状态字符串)。
     校验顺序：Pydantic 结构 → 枚举白名单 → 证据真实性 → 数字白名单；任一失败修复重试一次。"""
     if task not in SCHEMA_BY_TASK:
@@ -79,7 +80,7 @@ def call_task(task: str, payload: dict, run_id: str, user_id: str = "team",
     schema_cls = SCHEMA_BY_TASK[task]
 
     data, status = call(prompt_text, payload, run_id=run_id,
-                        user_id=user_id, task=task, offline=offline)
+                        user_id=user_id, task=task, offline=offline, api_key=api_key)
     if data is None:
         return None, status
 
@@ -97,7 +98,8 @@ def call_task(task: str, payload: dict, run_id: str, user_id: str = "team",
             fix_payload["_fix"] = (f"上次输出未通过校验：{'；'.join(errs)}。"
                                    "请严格按 json 样例输出，只包含约定字段与合法取值。")
             data, status = call(prompt_text, fix_payload, run_id=run_id,
-                                user_id=user_id, task=task, offline=offline)
+                                user_id=user_id, task=task, offline=offline,
+                                api_key=api_key)
             if data is None:
                 return None, status + "|SCHEMA_FIX_NO_RESULT"
     return None, "SCHEMA_INVALID:" + ";".join(errs[:3])

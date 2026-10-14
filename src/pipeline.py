@@ -108,7 +108,8 @@ def _attach_evidence(items: list[dict], records: list[dict]) -> list[dict]:
     return enriched
 
 
-def run_match_item(records: list[dict], run_id: str, offline: bool):
+def run_match_item(records: list[dict], run_id: str, offline: bool,
+                   api_key: str | None = None):
     """科目归一化：把 A 的原始科目名映射到标准科目编号（模型侧第一步，始终可跑）。
     模型返回映射 → 程序回填来源证据 → 落盘 llm/mappings.json。
 
@@ -124,7 +125,7 @@ def run_match_item(records: list[dict], run_id: str, offline: bool):
     for i in range(0, len(headers), MAX_ITEMS):
         out, status = call_task("match_item",
                                 build_match_item(headers[i:i + MAX_ITEMS], standard),
-                                run_id, offline=offline)
+                                run_id, offline=offline, api_key=api_key)
         statuses.append(status)
         if out:
             merged.extend(out["items"])
@@ -179,7 +180,8 @@ CLAIM_BATCH = 20     # 起始批大小；失败时二分递减（见 _match_clai
 
 
 def _match_claim_batched(claims: list[dict], fields: list[dict],
-                         run_id: str, offline: bool) -> tuple[list[dict], list[str]]:
+                         run_id: str, offline: bool,
+                         api_key: str | None = None) -> tuple[list[dict], list[str]]:
     """分批调用 match_claim，并对"输出被截断"做自适应二分。
 
     deepseek-flash 默认开启深度思考，reasoning 与正文共享 max_tokens；若某批的
@@ -191,19 +193,20 @@ def _match_claim_batched(claims: list[dict], fields: list[dict],
         "match_claim",
         build_match_claim([{"claim_id": c["claim_id"], "sentence": c["sentence"]}
                            for c in claims], fields),
-        run_id, offline=offline)
+        run_id, offline=offline, api_key=api_key)
     # 只有"输出被截断"才值得拆小重试。缓存未命中、凭据错误这类失败，
     # 拆得再小也不会变好——不判断就会在离线模式下裂变成指数级调用。
     if out or len(claims) == 1 or "OUTPUT_EMPTY" not in status:
         return (out["matches"] if out else []), [status]
 
     mid = len(claims) // 2
-    m1, s1 = _match_claim_batched(claims[:mid], fields, run_id, offline)
-    m2, s2 = _match_claim_batched(claims[mid:], fields, run_id, offline)
+    m1, s1 = _match_claim_batched(claims[:mid], fields, run_id, offline, api_key=api_key)
+    m2, s2 = _match_claim_batched(claims[mid:], fields, run_id, offline, api_key=api_key)
     return m1 + m2, s1 + s2
 
 
-def run_match_claim(claims_path: str, records: list[dict], run_id: str, offline: bool):
+def run_match_claim(claims_path: str, records: list[dict], run_id: str, offline: bool,
+                    api_key: str | None = None):
     """研报引用匹配：claim 句子 → (item_code, period)。数值比较交给规则侧（C研 维度）。"""
     p = ROOT / claims_path
     if not p.exists():
@@ -215,7 +218,8 @@ def run_match_claim(claims_path: str, records: list[dict], run_id: str, offline:
     fields = _claim_fields(records)
     matches, flat_status = [], []
     for i in range(0, len(all_claims), CLAIM_BATCH):
-        m, s = _match_claim_batched(all_claims[i:i + CLAIM_BATCH], fields, run_id, offline)
+        m, s = _match_claim_batched(all_claims[i:i + CLAIM_BATCH], fields, run_id, offline,
+                                    api_key=api_key)
         matches.extend(m)
         flat_status.extend(s)
     claims = all_claims
@@ -269,10 +273,42 @@ def run_rules_engine(records: list[dict], run_id: str, offline: bool):
     return run_rules(records, run_id, offline)
 
 
+def run_commentary(records: list[dict], rule_res: list[dict],
+                   research_res: list[dict], csi: dict,
+                   run_id: str, offline: bool,
+                   api_key: str | None = None) -> str:
+    """研报式评价：把程序已算好的经营指标值 + CSI + 异常 + 研报比对喂给模型，
+    让它写一段分析评价（数字白名单校验）。失败/离线不中断，返回状态字符串。"""
+    from src.inputs import build_gen_commentary, collect_allowed_numbers
+    names = {c: n for c, n in _standard_items()}
+    metrics = [{
+        "code": r.get("item_code", ""),
+        "name": names.get(r.get("item_code", ""), r.get("item_raw", "") or r.get("item_code", "")),
+        "period": r.get("period", ""),
+        "value": r.get("value", ""),
+    } for r in records if r.get("item_code")]
+
+    anomalies = [r for r in rule_res if r.get("status") in ("FAIL", "REVIEW")]
+    research_fail = [r for r in research_res if r.get("status") == "FAIL"]
+
+    payload = build_gen_commentary(metrics, csi or {}, anomalies, research_fail,
+                                   (csi or {}).get("grade_label", ""))
+    allowed = collect_allowed_numbers(payload)
+    out, status = call_task("gen_commentary", payload, run_id, offline=offline,
+                            context={"allowed_numbers": allowed}, api_key=api_key)
+    _write_json(run_id, "llm/commentary.json", {
+        "run_id": run_id,
+        "status": status,
+        "text": (out or {}).get("text", "") if out else "",
+    })
+    return status
+
+
 def run(config_path: str, offline: bool = False, run_id: str = "demo",
         claims_override: str | None = None,
         data_dir_override: str | None = None,
-        skip_claims: bool = False) -> dict:
+        skip_claims: bool = False,
+        api_key: str | None = None) -> dict:
     """入口：加载配置 → 解析数据 → 语义提取 → 规则核查（钩子）→ 落盘清单。
 
     claims_override / data_dir_override：由文件夹入口（src.ingest）传入本次现场
@@ -297,9 +333,10 @@ def run(config_path: str, offline: bool = False, run_id: str = "demo",
                             prompts=[meta_item, meta_claim], input_files=[])
 
     # 1. 科目归一化（财报原文科目名 → 标准科目编号）
-    _, s_item = run_match_item(records, run_id, offline)
+    _, s_item = run_match_item(records, run_id, offline, api_key=api_key)
     # 2. 研报引用匹配（claim 句子 → 科目+期间）：模型只答"在说哪个指标"
-    claim_matches, s_claim = (run_match_claim(claims_path, records, run_id, offline)
+    claim_matches, s_claim = (run_match_claim(claims_path, records, run_id, offline,
+                                              api_key=api_key)
                               if claims_path else (None, "NOT_CONFIGURED"))
     # 2b. C研 维度数值比对（确定性计算，模型不参与，见 src/research_check.py）
     s_research = "SKIPPED"
@@ -323,13 +360,20 @@ def run(config_path: str, offline: bool = False, run_id: str = "demo",
         #   模型措辞与置信度在多次真实调用间会浮动（实测同一输入 confidence 0.80/0.85），
         #   混进结果文件会让"结果可机器比对、逐字节复现"失效。
         #   结果文件保持纯确定性；模型输出单独存放，由报告/网页按编号关联展示。
-        explain_anomalies(rule_res, run_id, offline, research_results=rc_res)
+        explain_anomalies(rule_res, run_id, offline, research_results=rc_res,
+                          api_key=api_key)
         s_explain = explain_summary(run_id)
+
+    # 5. 研报式评价：程序把确定数字喂给模型写分析评价（数字白名单校验，可离线降级）
+    s_comment = run_commentary(records, rule_res, rc_res, (rr or {}).get("csi"),
+                               run_id, offline, api_key=api_key)
 
     manifest["outputs"].update({"match_item_status": s_item,
                                 "match_claim_status": s_claim,
                                 "research_check": s_research,
-                                "explain": s_explain})
+                                "explain": s_explain,
+                                "commentary": s_comment})
     save_manifest(run_id, manifest)
     return {"run_id": run_id, "match_item": s_item, "match_claim": s_claim,
-            "research_check": s_research, "explain": s_explain}
+            "research_check": s_research, "explain": s_explain,
+            "commentary": s_comment}

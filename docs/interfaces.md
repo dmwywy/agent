@@ -416,7 +416,7 @@ v1.3 → v1.4：`statement` 枚举新增 `MDNA`（第三节 管理层讨论与�
 
 ## 5. 接口 [4]：模型输入输出契约（信息工程内部，供 A/B 知悉）
 
-### 5.1 四类输入（`src/inputs.py`）
+### 5.1 六类输入（`src/inputs.py`）
 
 | 序 | 任务名 | 输入内容 | 关键约束 |
 |---|---|---|---|
@@ -424,14 +424,17 @@ v1.3 → v1.4：`statement` 枚举新增 `MDNA`（第三节 管理层讨论与�
 | [2] | `unit_period` | `chunk_id` + `header_text` + `candidates` | 候选表必须给出 |
 | [3] | `match_claim` | `claims` + `fields` | **只给科目与期间，不给金额** |
 | [4] | `explain_anomaly` | `rule_id` + `diff_desc` + `chunk_id` + `quote` + `candidates` | 候选原因必须给出 |
+| [5] | `gen_report_text` | `dimensions` + `anomaly_items` + `grade_label` | **不得产出任何数字**，数字由程序在模板填 |
+| [6] | `gen_commentary` | `metrics` + `csi` + `anomalies` + `research` + `counts` | 只引用输入已给的数，禁止自行计算；数字白名单校验 |
 
-### 5.2 五类输出（`src/schemas.py`）
+### 5.2 六类输出（`src/schemas.py`）
 
-`match_item` → `MatchItemOut`；`unit_period` → `UnitPeriodOut`；`match_claim` → `MatchClaimOut`；`explain_anomaly` → `ExplainOut`；`gen_report_text` → `ReportTextOut`。
+`match_item` → `MatchItemOut`；`unit_period` → `UnitPeriodOut`；`match_claim` → `MatchClaimOut`；`explain_anomaly` → `ExplainOut`；`gen_report_text` → `ReportTextOut`；`gen_commentary` → `ReportTextOut`。
 
 所有输出必须包含 `evidence`（含 `chunk_id` 与 `quote`）。
 **例外（v1.1）**：`match_item` 的输出不含 `evidence`，其证据由程序回填，理由见 §3.1（3.1a）。
-其余四类任务仍必须由模型返回 `evidence` 并通过程序校验。
+`gen_report_text` / `gen_commentary` 为纯文本任务，亦不返回 `evidence`。
+其余类任务仍必须由模型返回 `evidence` 并通过程序校验。
 
 ### 5.3 模型三条禁则
 
@@ -480,6 +483,8 @@ CSV，列固定为：
 （2）报告中的专业表述（结论措辞、风险提示、修改建议）由金融侧审核定稿。
 
 （3）报告首页必须包含声明："本系统输出为财务数据一致性核查结果，不构成投资建议，所有结论需人工复核。"
+
+（4）报告须包含两段**成段结论**，置于清单式章节之前：首页「核查总评」（核查规模、异常分布、CSI 等级与处置建议）与「研报观点与财报数字差异点评」（逐条列出研报原句、研报值、财报值、差异与确定性归因）。两段均由程序按确定性模板从已有产物（counts / csi / research_claims）生成，**不新增模型调用、不重算任何数值**，离线可复现。
 
 ## 7. 配置文件的字段与格式
 

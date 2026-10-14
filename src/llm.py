@@ -39,10 +39,17 @@ if MODEL_ID not in ALLOWED_MODELS:
     )
 
 
-def _client() -> OpenAI:
-    key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
+def _client(api_key: str | None = None) -> OpenAI:
+    """构造出站客户端。api_key 为空时回落到 .env / 环境变量。
+
+    ★ 网页侧允许使用者在界面里临时填入 Key（见 app.py 的上传表单），
+      它经 call → call_task → pipeline 一路透传到此处，**只用于构造客户端**：
+      不写日志、不进缓存键、不进报告（缓存键不含凭据，换人换机器仍命中同一份缓存）。
+    """
+    key = (api_key or os.getenv("DEEPSEEK_API_KEY") or "").strip()
     if not key:
-        raise RuntimeError("未找到 DEEPSEEK_API_KEY：请检查项目根目录的 .env")
+        raise RuntimeError("未找到 DEEPSEEK_API_KEY：请在界面填入，"
+                           "或检查项目根目录的 .env")
     return OpenAI(api_key=key, base_url=BASE_URL)
 
 
@@ -58,7 +65,7 @@ def cache_key(prompt_text: str, payload: dict) -> str:
 
 def call(prompt_text: str, payload: dict, run_id: str = "default",
          user_id: str = "team", task: str = "", offline: bool = False,
-         max_retry: int = 3):
+         max_retry: int = 3, api_key: str | None = None):
     """返回 (结果 dict 或 None, 状态字符串)。任何失败都不中断流程。"""
     ck = cache_key(prompt_text, payload)
     cache = ROOT / "runs" / run_id / "llm_cache" / f"{ck}.json"
@@ -76,7 +83,7 @@ def call(prompt_text: str, payload: dict, run_id: str = "default",
                   status="NO_CACHE_OFFLINE", cache_key=ck[:16])
         return None, "NO_CACHE_OFFLINE"
 
-    client = _client()
+    client = _client(api_key)
     for i in range(max_retry):
         try:
             r = client.chat.completions.create(

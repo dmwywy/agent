@@ -1,6 +1,7 @@
 # 返回校验模块
 # src/validators.py
 import re
+from decimal import Decimal, InvalidOperation
 
 def check_enum_whitelist(obj, allowed: dict) -> list[str]:
     """枚举白名单：canonical_item / item_code / cause 只能在候选集合里"""
@@ -19,12 +20,26 @@ def check_enum_whitelist(obj, allowed: dict) -> list[str]:
             errs.append(f"cause 越界：{obj['cause']}")
     return errs
 
+def _canon_num(s: str) -> str | None:
+    """把数字串归一化为**数值等价**的标准写法（去逗号、去尾零与小数点），
+    使 95.0 与 95、174140000000.00 与 174140000000 视为同一数字。"""
+    clean = s.replace(",", "")
+    if not clean:
+        return None
+    try:
+        d = Decimal(clean)
+    except InvalidOperation:
+        return clean
+    return format(d.normalize(), "f")
+
+
 def check_no_amounts(text: str, allowed_numbers: set[str]) -> list[str]:
-    """★ 报告文字里出现的每个数字，都必须在程序给定的白名单里"""
+    """★ 报告文字里出现的每个数字，都必须在程序给定的白名单里（数值等价比较）。"""
+    allowed_canon = {c for a in allowed_numbers
+                     if (c := _canon_num(a)) is not None}
     errs = []
     for num in re.findall(r"\d[\d,]*\.?\d*", text):
-        clean = num.replace(",", "")
-        if clean not in allowed_numbers:
+        if _canon_num(num) not in allowed_canon:
             errs.append(f"报告中出现未经程序确认的数字：{num}")
     return errs
 

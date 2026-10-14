@@ -43,20 +43,30 @@ st.warning(DISCLAIMER)
 
 with st.container(border=True):
     st.subheader("上传材料并开始核查")
-    st.caption("拖拽或选择年报 PDF / DOCX。可只上传年报；若文件名没有年份，请填写报告年度。")
+    st.caption("拖拽或选择年报 / 半年报 PDF / DOCX。若文件名没有年份，请填写报告年度；半年度报告请把报告期间选为「半年报」。")
     with st.form("report_upload_form"):
         uploaded_files = st.file_uploader(
-            "选择年报文件", type=["pdf", "docx", "docm"],
+            "选择报告文件", type=["pdf", "docx", "docm"],
             accept_multiple_files=True, max_upload_size=300,
-            help="支持一份或多份年报；同一批上传的报告需属于同一种期间类型。",
+            help="支持一份或多份报告；同一批上传的报告需属于同一种期间类型。",
         )
         year_default = st.number_input(
             "文件名没有年份时使用的报告年度", min_value=2000, max_value=2100,
             value=2025, step=1,
         )
+        period_label = st.selectbox(
+            "报告期间", ("年报", "半年报"), index=0,
+            help="半年报：利润表、现金流量表按年初至 6 月 30 日累计（YTD），"
+                 "资产负债表期末余额取 6 月 30 日。选错期间会让半年报被按年报列头抽取、结论失真。",
+        )
         offline_mode = st.checkbox(
             "离线运行（不调用模型，只使用本地缓存）", value=True,
             help="离线缓存未命中时，语义任务转人工复核；规则核查和报告仍会继续。取消勾选会使用已配置的模型 API。",
+        )
+        api_key_input = st.text_input(
+            "DeepSeek API Key（可选，留空则用 .env 里已配置的密钥）", type="password",
+            help="取消勾选离线运行后，模型调用需要 Key。此处填的 Key 仅用于本次运行构造请求，"
+                 "不写入日志、报告或缓存；留空时读取项目根目录 .env 的 DEEPSEEK_API_KEY。",
         )
         submitted = st.form_submit_button(
             "开始核查并生成报告", type="primary", icon=":material/fact_check:",
@@ -73,7 +83,10 @@ with st.container(border=True):
                 with st.status("正在处理上传材料…", expanded=True) as progress:
                     outcome = run_uploaded_reports(
                         uploaded_files, run_id=run_id, default_year=int(year_default),
-                        offline=offline_mode, on_progress=progress.write,
+                        offline=offline_mode,
+                        report_period="half_year" if period_label == "半年报" else "annual",
+                        api_key=(api_key_input or None),
+                        on_progress=progress.write,
                     )
                     progress.update(label="核查完成，报告已生成", state="complete")
 
@@ -95,7 +108,12 @@ if not runs:
 
 default_run = st.session_state.get("selected_run_id")
 default_index = runs.index(default_run) if default_run in runs else 0
-run_id = st.sidebar.selectbox("选择运行编号", runs, index=default_index, key="run_selection")
+run_id = st.sidebar.selectbox(
+    "选择运行编号", runs, index=default_index, key="run_selection",
+    help="每个运行编号对应 runs/<run_id>/ 下的一个历史运行目录。选中哪一个，"
+         "右侧所有指标与明细就读哪一个目录的落盘产物；上传新文件后会自动切到本次运行。")
+st.sidebar.caption("运行编号 = 一次核查的目录名（含上传件、提取字段、核查结果、报告）。")
+
 base = ROOT / "runs" / run_id
 manifest = _read(base / "manifest.json", {}) or {}
 results = (_read(base / "rules" / "results.json", {}) or {}).get("results", [])
@@ -127,6 +145,9 @@ c2.metric("提取字段", len(fields))
 c3.metric("规则结果", len(results))
 c4.metric("异常 / 待复核", len(anomalies))
 c5.metric("模型调用", f"{calls.get('api_ok', 0)} 在线 / {calls.get('cache_hit', 0)} 缓存")
+st.caption("指标卡读的是**左侧选中的历史运行**的统计，与上传表单里是否勾选离线无关。"
+           "「模型调用」= 在线（api_ok，真实请求成功）/ 缓存（cache_hit，命中本地缓存）。"
+           "离线运行、或该次全部命中缓存时，都会显示为 0 在线。")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["① 异常清单", "② 一致性指标", "③ 提取字段", "④ 规则明细", "⑤ 报告下载"],

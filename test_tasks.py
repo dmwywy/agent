@@ -18,7 +18,7 @@ def test_temperature_fixed():
 
 
 def test_schema_count_and_export():
-    assert len(SCHEMA_BY_TASK) == 5
+    assert len(SCHEMA_BY_TASK) == 6
     for cls in SCHEMA_BY_TASK.values():
         cls.model_json_schema()
 
@@ -152,8 +152,39 @@ def test_gen_report_text_excludes_amounts():
     assert "5000000000" not in json.dumps(p, ensure_ascii=False)
 
 
+def test_gen_commentary_filters_to_core_metrics():
+    """研报式评价只喂核心科目，非核心科目（如附注明细）不进入输入。"""
+    from src.inputs import build_gen_commentary
+    p = build_gen_commentary(
+        [{"code": "TOTAL_REVENUE", "name": "营业总收入", "period": "2024",
+          "value": "174140000000.00"},
+         {"code": "SUPP_DEPRECIATION", "name": "补充资料固定资产折旧", "period": "2024",
+          "value": "123.45"}],
+        {"csi": 87.5, "grade": "A", "grade_label": "基本一致"},
+        [], [], "基本一致")
+    codes = {m["code"] for m in p["metrics"]}
+    assert "TOTAL_REVENUE" in codes
+    assert "SUPP_DEPRECIATION" not in codes
+
+
+def test_commentary_whitelist_rejects_fabricated_number():
+    """模型评价里出现程序没给过的数字，必须被数字白名单校验拦下。"""
+    from src.inputs import build_gen_commentary, collect_allowed_numbers
+    from src.validators import check_no_amounts
+    p = build_gen_commentary(
+        [{"code": "TOTAL_REVENUE", "name": "营业总收入", "period": "2024",
+          "value": "174140000000.00"}],
+        {"csi": 87.5, "grade": "A", "grade_label": "基本一致"}, [], [], "基本一致")
+    allowed = collect_allowed_numbers(p)
+    # 引用了输入里没有的"毛利率 92.5%"这种编造数字 → 必须被拦
+    errs = check_no_amounts("公司毛利率为 92.5%，超出预期。", allowed)
+    assert any("未经程序确认" in e for e in errs)
+    # 合法引用输入里的数字不被拦
+    assert check_no_amounts("营业总收入 174140000000.00 元。", allowed) == []
+
+
 def test_all_five_tasks_have_input_builders():
-    """5 个任务必须各有输入构造器（此前 gen_report_text 缺失）。"""
+    """每个任务必须各有输入构造器。"""
     from src import inputs
     from src.schemas import SCHEMA_BY_TASK
     for task in SCHEMA_BY_TASK:
@@ -210,11 +241,37 @@ def test_empty_content_is_not_retried(monkeypatch):
 
     fake_client = SimpleNamespace(chat=SimpleNamespace(
         completions=SimpleNamespace(create=fake_create)))
-    monkeypatch.setattr(L, "_client", lambda: fake_client)
+    monkeypatch.setattr(L, "_client", lambda *_a, **_k: fake_client)
 
     data, status = L.call("提示词 json", {"task": "x", "n": 2}, run_id="pytest_empty")
     assert data is None and status == "OUTPUT_EMPTY"
     assert calls["n"] == 1, "空正文应直接返回，不得重试"
+
+
+def test_api_key_override_reaches_client(monkeypatch, tmp_path):
+    """网页表单里临时填入的 Key 必须一路透传到出站客户端，且不进缓存键。"""
+    import src.llm as L
+    from types import SimpleNamespace
+    seen = []
+    # 隔离缓存目录：否则第一次调用会把缓存写进 runs/，重复运行变成 CACHE_HIT、断言不再成立
+    monkeypatch.setattr(L, "ROOT", tmp_path)
+
+    def fake_client(api_key=None):
+        seen.append(api_key)
+        return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+            create=lambda **kw: SimpleNamespace(
+                choices=[SimpleNamespace(finish_reason="stop",
+                                         message=SimpleNamespace(content='{"ok": true}'))],
+                usage=SimpleNamespace(completion_tokens=1)))))
+
+    monkeypatch.setattr(L, "_client", fake_client)
+    data, status = L.call("提示词 json", {"task": "k"}, run_id="pytest_key",
+                          api_key="sk-ui-supplied")
+
+    assert data == {"ok": True} and status.startswith("API_OK")
+    assert seen and seen[0] == "sk-ui-supplied", "表单填的 Key 应传给出站客户端"
+    # 缓存键不含凭据：同一输入恒得同一指纹（换 Key 不会让缓存失效）
+    assert L.cache_key("提示词 json", {"task": "k"}) == L.cache_key("提示词 json", {"task": "k"})
 
 
 def test_offline_miss_does_not_split_exponentially(monkeypatch):
@@ -728,6 +785,30 @@ def _make_run_fixture(run_id: str) -> None:
         "dimensions": {"C内": {"score": 0.875, "rules_applicable": 2, "pass": 1,
                                "fail": 1, "review": 0, "na": 0}},
         "na_dimensions": [], "note": ""}, ensure_ascii=False), encoding="utf-8")
+    # 现场解析产物（有它才会出现「提取字段数」与总评里的字段计数）
+    (base / "ingested").mkdir(parents=True, exist_ok=True)
+    (base / "ingested" / "sample.json").write_text(json.dumps([
+        {"item_code": "TOTAL_ASSETS", "item_raw": "资产总计", "period": "2024-12-31",
+         "period_type": "BAL_END", "value": "1000", "page": 9, "raw_text": "资产总计 1000"},
+        {"item_code": "TOTAL_LIAB", "item_raw": "负债合计", "period": "2024-12-31",
+         "period_type": "BAL_END", "value": "400", "page": 9, "raw_text": "负债合计 400"},
+    ], ensure_ascii=False), encoding="utf-8")
+    # C研 维度比对结果：一条不一致 + 一条待复核，供「研报差异点评」渲染
+    (base / "rules" / "research_claims.json").write_text(json.dumps({
+        "results": [
+            {"rule_id": "RC01@v1.0", "dimension": "C研", "claim_id": "c1", "status": "FAIL",
+             "item_code": "TOTAL_REVENUE", "period": "2024",
+             "left": {"source": "research_report", "raw": "1741.4 亿元", "value": "174140000000"},
+             "right": {"item_code": "TOTAL_REVENUE", "period": "2024", "value": "170000000000"},
+             "diff": "4140000000", "tolerance": "1000", "severity": "HIGH",
+             "cause": "VALUE_ERROR", "reason": "研报值 / 财报值 = 1.0244，非 10 的整数次幂",
+             "evidence": {"file": "b.docx", "section": "核心观点",
+                          "sentence": "公司2024年营业总收入1741.4亿元",
+                          "verified": True}},
+        ],
+        "review": [{"claim_id": "c2", "reason": "模型未返回该条的匹配结果",
+                    "sentence": "预计2025年收入增长8%"}],
+    }, ensure_ascii=False), encoding="utf-8")
 
 
 def test_report_build_all_three_formats():
@@ -753,6 +834,40 @@ def test_report_build_all_three_formats():
     with __import__("pdfplumber").open(ROOT / made["pdf"]) as pdf:
         text = "\n".join(p.extract_text() or "" for p in pdf.pages)
     assert DISCLAIMER in text and "CSI" in text
+
+
+def test_report_includes_summary_and_research_review():
+    """报告必须给出成段结论：核查总评 + 研报观点与财报数字差异点评（三种格式都有）。"""
+    from openpyxl import load_workbook
+    from src.pipeline import ROOT
+    from src.report import build_all
+
+    _make_run_fixture("pytest_report_review")
+    made = build_all("pytest_report_review", ("html", "xlsx", "pdf"))
+
+    html = (ROOT / made["html"]).read_text(encoding="utf-8")
+    assert "核查总评" in html
+    # 总评必须真的复述程序产物里的数字，而不是空话
+    assert "提取结构化字段 2 条" in html
+    assert "异常集中在 表内勾稽 1 条" in html
+    assert "CSI = 87.5" in html
+    assert "等级 B（基本一致）" in html
+    assert "处置建议" in html
+    # 研报差异点评必须带上研报原句与差异，便于人工追溯
+    assert "研报观点与财报数字差异点评" in html
+    assert "公司2024年营业总收入1741.4亿元" in html
+    assert "TOTAL_REVENUE" in html
+
+    wb = load_workbook(ROOT / made["xlsx"])
+    summary_cells = [str(c.value) for row in wb["摘要"].iter_rows() for c in row if c.value]
+    assert any(v.startswith("核查总评") for v in summary_cells)
+    assert any("研报差异点评" == v for v in summary_cells)
+    assert any("提取结构化字段 2 条" in v for v in summary_cells)
+
+    with __import__("pdfplumber").open(ROOT / made["pdf"]) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    assert "核查总评" in text and "研报观点与财报数字差异点评" in text
+    assert "1741.4" in text
 
 
 def test_na_dimensions_get_zero_normalized_weight():
@@ -821,9 +936,10 @@ def test_web_upload_orchestrator_persists_and_runs(monkeypatch):
         def getvalue(self):
             return b"local-pdf-payload"
 
-    def fake_ingest(folder, out_dir, default_year):
+    def fake_ingest(folder, out_dir, default_year, report_period=None):
         calls["uploaded"] = (folder / Upload.name).read_bytes()
         calls["year"] = default_year
+        calls["period"] = report_period
         return {"structured_files": [out_dir / "sample.json"], "claims_path": None}
 
     def fake_pipeline(config, **kwargs):
@@ -845,6 +961,7 @@ def test_web_upload_orchestrator_persists_and_runs(monkeypatch):
         )
         assert calls["uploaded"] == b"local-pdf-payload"
         assert calls["year"] == 2024
+        assert calls["period"] == "annual"
         assert calls["pipeline"][1]["offline"] is True
         assert calls["pipeline"][1]["skip_claims"] is True
         assert calls["reports"] == (run_id, ("pdf", "xlsx", "html"))
@@ -902,7 +1019,7 @@ def test_web_upload_unknown_file_still_builds_report(monkeypatch):
             return b"payload"
 
     monkeypatch.setattr(ingest, "process_folder",
-                        lambda folder, out_dir, default_year: {
+                        lambda folder, out_dir, default_year, report_period=None: {
                             "structured_files": [], "claims_path": None})
     monkeypatch.setattr(pipeline, "run", lambda *a, **k: seen.update(k))
     monkeypatch.setattr(report, "build_all",
@@ -913,6 +1030,48 @@ def test_web_upload_unknown_file_still_builds_report(monkeypatch):
         assert set(out["reports"]) == {"pdf", "xlsx", "html"}
         assert seen, "没识别出年报也必须跑完流程再出报告"
         assert seen["data_dir_override"].replace("\\", "/") == f"runs/{run_id}/ingested"
+    finally:
+        shutil.rmtree(run_root, ignore_errors=True)
+
+
+def test_web_upload_threads_report_period(monkeypatch):
+    """网页上传必须把「报告期间」透传到解析器，并拒绝非法取值。
+
+    漏传会退回默认 annual：半年报被按年报列头抽取、流量科目标成全年 FY，
+    与用户上传的文件对不上——这正是"传进去的报告结论全错"的根因之一。
+    """
+    import shutil
+    import pytest
+    from src import ingest, pipeline, report
+    from src.web import ROOT, run_uploaded_reports
+
+    run_id = "pytest_web_upload_half_year"
+    run_root = ROOT / "runs" / run_id
+    shutil.rmtree(run_root, ignore_errors=True)
+    seen = {}
+
+    class Upload:
+        name = "贵州茅台2026年半年度报告.pdf"
+
+        def getvalue(self):
+            return b"payload"
+
+    def fake_ingest(folder, out_dir, default_year, report_period=None):
+        seen["period"] = report_period
+        return {"structured_files": [], "claims_path": None}
+
+    monkeypatch.setattr(ingest, "process_folder", fake_ingest)
+    monkeypatch.setattr(pipeline, "run", lambda *a, **k: None)
+    monkeypatch.setattr(report, "build_all", lambda r, f: {})
+
+    try:
+        run_uploaded_reports([Upload()], run_id=run_id, default_year=2026,
+                             offline=True, report_period="half_year")
+        assert seen["period"] == "half_year"
+        with pytest.raises(ValueError, match="不支持的报告期间"):
+            run_uploaded_reports([Upload()], run_id="pytest_web_upload_bad_period",
+                                 default_year=2026, offline=True,
+                                 report_period="quarterly")
     finally:
         shutil.rmtree(run_root, ignore_errors=True)
 

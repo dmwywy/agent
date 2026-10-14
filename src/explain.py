@@ -85,7 +85,8 @@ def _research_locator(r: dict) -> tuple[str, str]:
 
 def explain_anomalies(rule_results: list[dict], run_id: str,
                       offline: bool = False,
-                      research_results: list[dict] | None = None) -> list[dict]:
+                      research_results: list[dict] | None = None,
+                      api_key: str | None = None) -> list[dict]:
     """为 FAIL / REVIEW 条目补充模型解释，返回补充后的结果（原地也更新）。
 
     只处理带证据的条目——没有证据就没法让模型解释，这类直接跳过，
@@ -110,7 +111,7 @@ def explain_anomalies(rule_results: list[dict], run_id: str,
         )
         out, status = call_task(
             "explain_anomaly", payload, run_id, offline=offline,
-            context={"chunks": {cid: quote}})
+            context={"chunks": {cid: quote}}, api_key=api_key)
         statuses.append(status)
 
         # 程序侧已有的确定性归因（研报维度会带 cause）；用于与模型判断对比

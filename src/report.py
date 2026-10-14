@@ -42,6 +42,7 @@ def collect(run_id: str) -> dict:
     csi = _read(base / "rules" / "csi.json", {}) or {}
     research = _read(base / "rules" / "research_claims.json", {}) or {}
     mappings = _read(base / "llm" / "mappings.json", {}) or {}
+    commentary = _read(base / "llm" / "commentary.json", {}) or {}
 
     rule_results = results.get("results", [])
     # 模型解释单独存放（结果文件保持纯确定性），此处按编号关联回来仅供展示
@@ -68,7 +69,7 @@ def collect(run_id: str) -> dict:
             fields.extend(r for r in payload
                           if isinstance(r, dict) and "item_code" in r)
 
-    return {
+    model = {
         "run_id": run_id,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
         "report_version": REPORT_VERSION,
@@ -82,8 +83,13 @@ def collect(run_id: str) -> dict:
         "research_fail": research_fail,
         "mappings": mappings,
         "fields": fields,
+        "commentary": commentary,
         "counts": _counts(rule_results, research),
     }
+    # 成段结论：由已完成聚合的计数与比对结果生成，供三种报告共用同一份文案
+    model["summary"] = build_summary(model)
+    model["research_review"] = build_research_review(model)
+    return model
 
 
 def _counts(rule_results: list[dict], research: dict) -> dict:
@@ -108,6 +114,104 @@ def _counts(rule_results: list[dict], research: dict) -> dict:
         "research_review": len(research.get("review", [])),
         "fields": 0,      # 由 caller 填
     }
+
+
+def _dim_counts(counts: dict) -> tuple[int, int, int, int, int]:
+    """把 rules_per_dim 的计数做展示性汇总：(可执行, 通过, 异常, 待复核, 不适用)。
+
+    只汇总已存在的计数器，不重算任何财务数值——报告不承担计算职责。
+    """
+    per = counts.get("rules_per_dim") or {}
+    return (sum(v["applicable"] for v in per.values()),
+            sum(v["pass"] for v in per.values()),
+            sum(v["fail"] for v in per.values()),
+            sum(v["review"] for v in per.values()),
+            sum(v["na"] for v in per.values()))
+
+
+def build_summary(model: dict) -> list[str]:
+    """核查总评：把已有的计数与 CSI 组织成**成段结论**，置于报告首页。
+
+    ★ 只陈述 model 里已经存在的数字（counts / csi / manifest / fields），
+      不新做任何计算与猜测：报告不产结论性判断，仅呈现程序侧的事实。
+      全部由确定性文本模板生成，离线可复现，不增加模型调用。
+    """
+    c = model.get("counts") or {}
+    applicable, passed, failed, review, na = _dim_counts(c)
+    paras = [f"本次核查共提取结构化字段 {len(model.get('fields') or [])} 条，"
+             f"执行规则 {c.get('rules_total', 0)} 条，其中可执行 {applicable} 条、"
+             f"通过 {passed} 条、异常 {failed} 条、待人工复核 {review} 条、不适用 {na} 条。"]
+
+    per = c.get("rules_per_dim") or {}
+    hits = [(k, v["fail"]) for k, v in sorted(per.items()) if v.get("fail")]
+    if hits:
+        paras.append("异常集中在 " + "、".join(
+            f"{DIM_ZH.get(k, k)} {n} 条" for k, n in hits) + "。")
+    else:
+        paras.append("未发现规则级异常：表内勾稽与表间比对在容差内自洽。")
+
+    rc = (model.get("research") or {}).get("results") or []
+    if rc:
+        paras.append(f"研报引用核查共比对 {len(rc)} 条："
+                     f"一致 {sum(1 for r in rc if r.get('status') == 'PASS')} 条、"
+                     f"不一致 {sum(1 for r in rc if r.get('status') == 'FAIL')} 条、"
+                     f"待人工复核 {len((model.get('research') or {}).get('review') or [])} 条。")
+    else:
+        paras.append("本批材料未包含研究报告，或研报引用未匹配到可比字段：研报引用维度不适用。")
+
+    csi = model.get("csi") or {}
+    if csi.get("csi") is not None:
+        paras.append(f"综合一致性指数 CSI = {csi.get('csi')}，"
+                     f"等级 {csi.get('grade')}（{csi.get('grade_label', '')}）。")
+    else:
+        paras.append("本次运行没有可执行的规则，未计算 CSI。")
+
+    advice = []
+    if failed:
+        advice.append(f"建议优先人工核对上述 {failed} 条异常，回到原始披露确认差异是否属于"
+                      f"列报口径、会计政策变更或四舍五入。")
+    if review:
+        advice.append(f"另有 {review} 条标记为待人工复核，程序无法自动判定，不代表存在错误。")
+    if not failed and not review:
+        advice.append("报告期内没有需要人工介入的条目；可结合分部与附注披露做进一步复核。")
+    calls = (model.get("manifest") or {}).get("calls") or {}
+    if calls.get("cache_miss") or calls.get("failed"):
+        advice.append(f"离线运行下有 {calls.get('cache_miss', 0)} 条语义任务未命中缓存、"
+                      f"{calls.get('failed', 0)} 条调用失败，已转入人工复核，"
+                      f"在线重跑可补齐这部分语义匹配。")
+    paras.append("处置建议：" + "".join(advice))
+    paras.append("本报告仅反映材料内部的一致性与引用关系，不构成审计意见或投资建议。")
+    return paras
+
+
+def build_research_review(model: dict) -> list[str]:
+    """研报观点与财报数字差异点评：把已有比对结果写成成段点评。
+
+    ★ 数值一律取自 research_check 的产出（left/right/diff/tolerance/cause），
+      本函数只做文字陈述，不重算、不改写。
+    """
+    research = model.get("research") or {}
+    rc = research.get("results") or []
+    if not rc:
+        return []
+    fails = [r for r in rc if r.get("status") == "FAIL"]
+    passed = [r for r in rc if r.get("status") == "PASS"]
+    review = research.get("review") or []
+    paras = [f"本批材料共比对研报引用 {len(rc)} 条：一致 {len(passed)} 条、"
+             f"不一致 {len(fails)} 条、待人工复核 {len(review)} 条。"]
+    for r in fails:
+        sentence = (r.get("evidence") or {}).get("sentence") or "（研报原句未记录）"
+        left = r.get("left") or {}
+        right = r.get("right") or {}
+        paras.append(
+            f"研报称「{sentence}」——该句把 {r.get('item_code')}（{r.get('period')}）"
+            f"表述为 {left.get('raw') or left.get('value')}，而财报披露为 {right.get('value')}，"
+            f"差异 {r.get('diff')}（容差 {r.get('tolerance')}）；"
+            f"归因 {r.get('cause', '')}：{r.get('reason', '') or '程序未给出进一步归因'}。"
+            f"建议核对引用数值、单位与期间，并按证据定位回研报原文确认。")
+    if not fails:
+        paras.append("研报引用与财报数字全部一致：本批比对未发现引用层面的不一致。")
+    return paras
 
 
 def _suggest(status: str, dimension: str, reason: str) -> str:
@@ -141,8 +245,16 @@ def render_pdf(model: dict, path: Path) -> Path:
     body = ParagraphStyle("body", parent=base["BodyText"], fontName="STSong-Light",
                           fontSize=9.5, leading=14)
     small = ParagraphStyle("small", parent=body, fontSize=8, textColor=colors.grey)
+    # 表格单元格样式：独立于 body，行高紧凑，配合 Paragraph 在列宽内自动换行
+    cell = ParagraphStyle("cell", parent=base["BodyText"], fontName="STSong-Light",
+                          fontSize=8, leading=10)
 
     def tbl(rows, widths=None, header=True):
+        # ★ 单元格一律用 Paragraph 渲染：纯字符串不会被 reportlab 换行，
+        #   长科目名（如"处置固定资产、无形资产和其他长期资产的损失…"）会直接
+        #   溢出到相邻列、字体重叠。Paragraph 会在列宽内自动断行，杜绝重叠。
+        rows = [[Paragraph(_esc(c), cell) if isinstance(c, str) else c for c in row]
+                for row in rows]
         t = Table(rows, colWidths=widths, repeatRows=1 if header else 0)
         t.setStyle(TableStyle([
             ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),
@@ -159,6 +271,12 @@ def render_pdf(model: dict, path: Path) -> Path:
              Spacer(1, 4),
              Paragraph(f"<b>{DISCLAIMER}</b>", body),
              Spacer(1, 8)]
+
+    # 核查总评：成段结论前置，让评审第一眼看到核查规模、异常分布与 CSI 等级
+    story.append(Paragraph("核查总评", h2))
+    for p in model.get("summary") or []:
+        story.append(Paragraph(_esc(p), body))
+    story.append(Spacer(1, 8))
 
     # 1 项目基本信息 / 2 材料范围
     m = model["manifest"]
@@ -219,6 +337,22 @@ def render_pdf(model: dict, path: Path) -> Path:
                          (r.get("right") or {}).get("value", "")[:18],
                          (r.get("diff") or "")[:18], f"{r.get('cause','')} {r.get('reason','')}"])
         story.append(tbl(rows, widths=[26 * mm, 20 * mm, 30 * mm, 34 * mm, 26 * mm, 29 * mm]))
+
+    # 研报观点 vs 财报数字：成段点评（有研报比对结果时才出现）
+    review = model.get("research_review") or []
+    if review:
+        story.append(Paragraph("研报观点与财报数字差异点评", h2))
+        for p in review:
+            story.append(Paragraph(_esc(p), body))
+        story.append(Spacer(1, 6))
+
+    # 大模型研报式评价（仅供参考）：数字均来自程序产物，经白名单校验
+    comment = (model.get("commentary") or {}).get("text", "")
+    if comment:
+        story.append(Paragraph("大模型经营评价（仅供参考）", h2))
+        story.append(Paragraph(_esc(comment), body))
+        story.append(Paragraph("本段由模型基于程序提取数据生成，仅供参考，不构成投资建议。", small))
+        story.append(Spacer(1, 6))
 
     # 11/12/13 量化评价
     story.append(PageBreak())
@@ -309,6 +443,15 @@ def render_xlsx(model: dict, path: Path) -> Path:
         ("声明", DISCLAIMER),
     ]:
         ws.append([k, v])
+    # 核查总评 / 研报差异点评 / 大模型评价：成段文本整段落入单元格并自动换行，Excel 里也能直接读到结论
+    comment = (model.get("commentary") or {}).get("text", "")
+    for label, paras in (("核查总评", model.get("summary") or []),
+                         ("研报差异点评", model.get("research_review") or []),
+                         ("大模型经营评价(仅供参考)", [comment] if comment else [])):
+        if not paras:
+            continue
+        ws.append([label, "\n".join(paras)])
+        ws.cell(ws.max_row, 2).alignment = Alignment(wrap_text=True, vertical="top")
     ws.column_dimensions["A"].width = 18
     ws.column_dimensions["B"].width = 70
 
@@ -408,6 +551,9 @@ def _table(header: list[str], rows: list[list]) -> str:
 def render_html(model: dict, path: Path) -> Path:
     sections = []
     m = model["manifest"]
+    # 核查总评：成段结论置顶，便于评审直接读到核查规模、异常分布与 CSI 等级
+    sections.append("<h2>核查总评</h2>" + "".join(
+        f"<p>{_esc(p)}</p>" for p in (model.get("summary") or [])))
     sections.append("<h2>一、项目基本信息与材料范围</h2>" + _table(
         ["项", "值"],
         [["运行编号", model["run_id"]],
@@ -442,6 +588,19 @@ def render_html(model: dict, path: Path) -> Path:
               (r.get("right") or {}).get("value"), r.get("diff"),
               f"{r.get('cause','')} {r.get('reason','')}"]
              for r in model["research_fail"]]))
+
+    # 研报观点 vs 财报数字：成段点评（有研报比对结果时才出现）
+    review = model.get("research_review") or []
+    if review:
+        sections.append("<h2>研报观点与财报数字差异点评</h2>" + "".join(
+            f"<p>{_esc(p)}</p>" for p in review))
+
+    # 大模型研报式评价（仅供参考）
+    comment = (model.get("commentary") or {}).get("text", "")
+    if comment:
+        sections.append("<h2>大模型经营评价（仅供参考）</h2>"
+                        f"<p>{_esc(comment)}</p>"
+                        "<p class=\"warn\">本段由模型基于程序提取数据生成，仅供参考，不构成投资建议。</p>")
 
     csi = model["csi"] or {}
     if csi:

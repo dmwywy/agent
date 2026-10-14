@@ -2,6 +2,9 @@
 # src/inputs.py
 """把 A 的解析结果包装成模型输入。本文件只做"包装"，不做任何数值计算。"""
 
+import re
+from decimal import Decimal, InvalidOperation
+
 MAX_CHARS = 4000          # 单段文本上限
 MAX_ITEMS = 40            # 一次最多让模型处理的科目/条款条数
 
@@ -77,4 +80,112 @@ def build_gen_report_text(dimensions: dict, anomalies: list[dict],
         "anomaly_items": safe,
         "grade_label": grade_label,
         "has_omitted_anomalies": len(anomalies) > MAX_ANOMALY_ITEMS,
+    }
+
+
+# ---------- 研报式评价：程序把确定数字喂给模型，模型写分析话，数字白名单校验 ----------
+MAX_COMMENT_METRICS = 24     # 最多喂多少条核心经营指标，控制篇幅与成本
+MAX_COMMENT_ANOMALIES = 20
+MAX_COMMENT_RESEARCH = 20
+
+# 供评价聚焦的核心科目（与研报点评最相关的收入/利润/现金流/资产负债主项）
+COMMENT_CORE = ("TOTAL_REVENUE", "REVENUE", "NP_PARENT", "NET_PROFIT",
+                "OPERATING_COST", "CF_OPERATING", "TOTAL_ASSETS", "TOTAL_LIAB",
+                "TOTAL_EQUITY", "REVENUE_MOUTAI", "REVENUE_SERIES")
+
+
+def _normalize_number(s: str) -> set[str]:
+    """把一个数字串展开成多个**数值等价**的字符串写法，避免被同等数值不同写法误拦截。
+
+    例："174140000000.00" → {"174140000000.00", "174140000000"}，
+        "87.50"          → {"87.50", "87.5"}。
+    括大的是**写法变体**，不是新数值——模型仍无法编造任何它没见过的数量。
+    """
+    clean = s.replace(",", "")
+    out = {clean}
+    try:
+        d = Decimal(clean)
+        if d == d.to_integral_value():
+            out.add(str(d.to_integral_value()))
+        else:
+            out.add(format(d.normalize(), "f"))
+    except InvalidOperation:
+        pass
+    return out
+
+
+def collect_allowed_numbers(obj) -> set[str]:
+    """从要喂给模型的 payload 里抽**程序已确认的全部数字**，去逗号后作为白名单。
+
+    模型评价文本中出现的每个数字都必须落在这个集合里——它只能引用程序给它的数，
+    不能自己编一个（如把它没看到的"毛利率=92%"算出来）。
+    """
+    nums = set()
+    if isinstance(obj, dict):
+        for v in obj.values():
+            nums |= collect_allowed_numbers(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            nums |= collect_allowed_numbers(v)
+    elif isinstance(obj, (int, float)):
+        s = f"{obj:g}" if isinstance(obj, float) else str(obj)
+        nums |= _normalize_number(s)
+    elif isinstance(obj, str):
+        for m in re.findall(r"\d[\d,]*\.?\d*", obj):
+            nums |= _normalize_number(m)
+    return nums
+
+
+def build_gen_commentary(metrics: list[dict], csi: dict, anomalies: list[dict],
+                         research_fail: list[dict], grade_label: str) -> dict:
+    """研报式评价输入：把所有"程序已算好的确定数字"喂给模型，让它写一段分析评价。
+
+    metrics: [{"code","name","period","value"}] —— 程序提取的经营指标值（带确定数值）
+    csi:     {"csi": 87.5, "grade": "A", "grade_label": "基本一致"}
+    anomalies:   异常清单（含确定 diff / tolerance）
+    research_fail: 研报引用比对不一数（含研报值/财报值/差异）
+
+    ★ 与 gen_report_text 相反：这里**给数字**，因为用户要的是"根据数据做评价"。
+    但数字一律来自程序产物，模型只负责组织语言、不比对新数；输出再经 collect_allowed_numbers
+    白名单兜底，任何程序没给的数字都会被拦截（src/tasks._post_checks）。
+    """
+    core = [{
+        "code": m.get("code", ""),
+        "name": m.get("name", m.get("code", "")),
+        "period": str(m.get("period", "")),
+        "value": str(m.get("value", "")),
+    } for m in metrics if m.get("code") in COMMENT_CORE][:MAX_COMMENT_METRICS]
+
+    safe_anom = [{
+        "dimension": a.get("dimension", ""),
+        "item_code": a.get("item_code", ""),
+        "status": a.get("status", ""),
+        "diff": str(a.get("diff", "")),
+        "tolerance": str(a.get("tolerance", "")),
+    } for a in anomalies[:MAX_COMMENT_ANOMALIES]]
+
+    safe_research = [{
+        "item_code": r.get("item_code", ""),
+        "period": str(r.get("period", "")),
+        "report_value": str((r.get("left") or {}).get("value", "")),
+        "truth_value": str((r.get("right") or {}).get("value", "")),
+        "diff": str(r.get("diff", "")),
+        "cause": r.get("cause", ""),
+    } for r in research_fail[:MAX_COMMENT_RESEARCH]]
+
+    return {
+        "task": "gen_commentary",
+        "metrics": core,
+        "csi": {"csi": csi.get("csi"),
+                "grade": csi.get("grade", ""),
+                "grade_label": grade_label},
+        "anomalies": safe_anom,
+        "research": safe_research,
+        # ★ 显式给出各清单条数：模型可引用"有 N 条…存在差异"这类**程序已知的计数**，
+        #   数字白名单据此放行（不得自行推算任何新数）。
+        "counts": {
+            "metrics": len(core),
+            "anomalies": len(safe_anom),
+            "research": len(safe_research),
+        },
     }

@@ -59,9 +59,10 @@ class ReportTextOut(BaseModel):
     text: str
 
 SCHEMA_BY_TASK = {
-    "match_item":     MatchItemOut,
-    "unit_period":    UnitPeriodOut,
-    "match_claim":    MatchClaimOut,
+    "match_item":      MatchItemOut,
+    "unit_period":     UnitPeriodOut,
+    "match_claim":     MatchClaimOut,
     "explain_anomaly": ExplainOut,
     "gen_report_text": ReportTextOut,
+    "gen_commentary":  ReportTextOut,   # 研报式评价：允许引用程序喂的确定数字，白名单校验
 }
