@@ -224,6 +224,35 @@ def test_derived_skips_missing_inputs():
     assert "RATIO_GROSS" not in got            # 没有营业成本，不得给毛利率
 
 
+def test_derived_zero_denominator_skips_without_crash():
+    """分母为零的派生项必须直接缺席、且不得抛除零异常；分子为零则是合法的。
+
+    六项比率的**分母**逐项守零：毛利率分母=营业收入、净利率系分母=营业总收入、
+    经营现金流净利润比分母=净利润、资产负债率分母=资产总计（`not in (None, 0)`）。
+    注意分子为零不得跳过：营业成本为 0 且收入非 0 时，毛利率 100% 是正确结果。
+    """
+    from src.derived import compute_derived
+    # ① 分母为零（营业收入/营业总收入/净利润/资产总计 均为 0）→ 六项比率一律缺席
+    got = {it["code"] for it in compute_derived([
+        {"item_code": "REVENUE", "period": "2024", "value": "0"},
+        {"item_code": "OPERATING_COST", "period": "2024", "value": "50000000"},
+        {"item_code": "TOTAL_REVENUE", "period": "2024", "value": "0"},
+        {"item_code": "NET_PROFIT", "period": "2024", "value": "0"},
+        {"item_code": "CF_OPERATING", "period": "2024", "value": "2000000"},
+        {"item_code": "TOTAL_ASSETS", "period": "2024-12-31", "value": "0"},
+        {"item_code": "TOTAL_LIAB", "period": "2024-12-31", "value": "1000000"},
+    ])}
+    for code in ("RATIO_GROSS", "RATIO_NET", "RATIO_NPP", "RATIO_OP",
+                 "RATIO_CASH", "RATIO_LEV"):
+        assert code not in got, f"零分母仍产出了 {code}"
+    # ② 分子为零是合法的：营业成本为 0、收入非 0 → 毛利率 100%（不得被跳过）
+    got2 = {it["code"]: it for it in compute_derived([
+        {"item_code": "REVENUE", "period": "2024", "value": "1000000000"},
+        {"item_code": "OPERATING_COST", "period": "2024", "value": "0"},
+    ])}
+    assert got2["RATIO_GROSS"]["value"] == "100.0"
+
+
 def test_derived_basis_and_name_contain_no_digits():
     """口径说明/名称/单位不得含阿拉伯数字——否则公式里的常数会污染数字白名单。"""
     import re

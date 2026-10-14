@@ -354,7 +354,7 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
 
     python -m pytest -q
 
-**当前状态（2026-10-14）**：收集 **83** 项 / **全部通过（83 passed / 0 failed）**。
+**当前状态（2026-10-14）**：收集 **84** 项 / **全部通过（84 passed / 0 failed）**。
 此前唯一红项 `test_web_app_handles_run_without_report` 已修复：`app.py` 报告下载页
 原先把「有没有报告」的判断与提示**一并**放进 `if tab5.open:` 惰性页签渲染门控，
 未打开该页签时 `streamlit.testing` 的 AppTest 取不到该提示文案；现改为只对
