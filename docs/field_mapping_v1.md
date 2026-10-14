@@ -1,10 +1,10 @@
 # 字段字典（mapping v1，程序侧冻结）
 
-> **版本**：1.1 ｜ **真源**：`rules/fields.yaml` ｜ **本文件由 `tools/export_fields.py` 生成，请勿手工编辑**
+> **版本**：1.3 ｜ **真源**：`rules/fields.yaml` ｜ **本文件由 `tools/export_fields.py` 生成，请勿手工编辑**
 >
 > 字段名、类型、枚举取值若需变更，须先改 `docs/interfaces.md` 并升版本号（§1.4），再改 `rules/fields.yaml`，然后重新生成本文件。
 
-共 **74** 个字段，其中核心字段（`core: true`）**24** 个。
+共 **90** 个字段，其中核心字段（`core: true`）**24** 个。
 
 ## 1. 字段清单
 
@@ -22,6 +22,10 @@
 | `AR_NET` | 应收账款 | 资产负债表 | 期末时点 | MAIN | 是 | — | — |
 | `INVENTORY` | 存货 | 资产负债表 | 期末时点 | MAIN | 是 | — | — |
 | `FIXED_ASSETS` | 固定资产（净额） | 资产负债表 | 期末时点 | MAIN |  | — | — |
+| `CONTRACT_LIAB` | 合同负债 | 资产负债表 | 期末时点 | MAIN |  | — | — |
+| `AP` | 应付账款 | 资产负债表 | 期末时点 | MAIN |  | — | — |
+| `SHORT_TERM_LOAN` | 短期借款 | 资产负债表 | 期末时点 | MAIN |  | — | — |
+| `LONG_TERM_LOAN` | 长期借款 | 资产负债表 | 期末时点 | MAIN |  | — | — |
 | `TOTAL_REVENUE` | 营业总收入 | 利润表 | 全年累计 | MAIN | 是 | — | 草稿标缺失 |
 | `REVENUE` | 营业收入 | 利润表 | 全年累计 | MAIN | 是 | — | — |
 | `OPERATING_COST` | 营业成本 | 利润表 | 全年累计 | MAIN | 是 | — | — |
@@ -30,6 +34,14 @@
 | `INCOME_TAX` | 所得税费用 | 利润表 | 全年累计 | MAIN | 是 | — | — |
 | `NET_PROFIT` | 净利润 | 利润表 | 全年累计 | MAIN | 是 | — | — |
 | `NP_PARENT` | 归属母公司股东的净利润 | 利润表 | 全年累计 | MAIN | 是 | — | — |
+| `SELLING_EXPENSE` | 销售费用 | 利润表 | 全年累计 | MAIN |  | — | — |
+| `ADMIN_EXPENSE` | 管理费用 | 利润表 | 全年累计 | MAIN |  | — | — |
+| `RD_EXPENSE` | 研发费用 | 利润表 | 全年累计 | MAIN |  | — | — |
+| `FIN_EXPENSE` | 财务费用 | 利润表 | 全年累计 | MAIN |  | — | — |
+| `TAX_SURCHARGE` | 税金及附加 | 利润表 | 全年累计 | MAIN |  | — | — |
+| `RATIO_GROSS` | 毛利率 | 利润表 | 全年累计 | MAIN |  | — | — |
+| `RATIO_NET` | 净利率 | 利润表 | 全年累计 | MAIN |  | — | — |
+| `RATIO_LEV` | 资产负债率 | 资产负债表 | 期末时点 | MAIN |  | — | — |
 | `CF_OPERATING` | 经营活动产生的现金流量净额 | 现金流量表 | 全年累计 | MAIN | 是 | — | — |
 | `CF_INVESTING` | 投资活动产生的现金流量净额 | 现金流量表 | 全年累计 | MAIN | 是 | — | — |
 | `CF_FINANCING` | 筹资活动产生的现金流量净额 | 现金流量表 | 全年累计 | MAIN | 是 | — | — |
@@ -84,6 +96,10 @@
 | `REVENUE_OVERSEAS` | 国外营业收入 | 管理层讨论与分析 | 全年累计 | MDNA |  | 第三节 主营业务分地区情况 | — |
 | `REVENUE_WHOLESALE` | 批发代理营业收入 | 管理层讨论与分析 | 全年累计 | MDNA |  | 第三节 主营业务分销售模式情况 | — |
 | `REVENUE_DIRECT` | 直销营业收入 | 管理层讨论与分析 | 全年累计 | MDNA |  | 第三节 主营业务分销售模式情况 | — |
+| `REVENUE_IMOUTAI` | i茅台营业收入 | 管理层讨论与分析 | 全年累计 | MDNA |  | 第三节 主营业务分销售模式情况 | — |
+| `VOLUME_MOUTAI` | 茅台酒销量 | 管理层讨论与分析 | 全年累计 | MDNA |  | 第三节 产销量情况表 | — |
+| `VOLUME_SERIES` | 系列酒销量 | 管理层讨论与分析 | 全年累计 | MDNA |  | 第三节 产销量情况表 | — |
+| `VOLUME_TOTAL` | 酒类总销量 | 管理层讨论与分析 | 全年累计 | MDNA |  | 第三节 产销量情况表 | — |
 
 ## 2. 与附件草稿的差异核对
 

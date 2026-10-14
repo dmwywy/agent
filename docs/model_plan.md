@@ -1,5 +1,10 @@
 # 模型调用方案（信工成员 · 9/27-9/29）
 
+> **修订说明（2026-10-14）**：本文为 2026-09-27 的初版模型调用方案，保留作历史记录。
+> 现行任务集已收敛为 **4 个**（`match_item` / `match_claim` / `explain_anomaly` / `gen_commentary`）：
+> 原 `unit_period`（单位/期间识别）与 `gen_report_text`（报告定性文字）经查**未被 pipeline 调用**，
+> 已作为死代码移除。下文涉及这两个任务的段落均已作废，以 `docs/interfaces.md` §5 为现行契约。
+
 ## 1. 模型名称
 - 平台：DeepSeek 开放平台；model id：deepseek-flash（默认）/ deepseek-v4-pro
 - 位置：src/llm.py 顶部 MODEL_ID，可由 .env 覆盖

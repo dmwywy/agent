@@ -25,16 +25,143 @@ REPORT_VERSION = "1.0"
 STATUS_ZH = {"PASS": "通过", "FAIL": "异常", "REVIEW": "需人工复核", "NA": "不适用"}
 DIM_ZH = {"C内": "表内勾稽", "C间": "表间一致", "C期": "跨期衔接",
           "C附": "主表与附注", "C研": "研报引用"}
+# 提取字段所属报表的中文名与展示顺序（供「按报表分类」渲染）
+STATEMENT_ZH = {"BS": "资产负债表", "IS": "利润表", "CF": "现金流量表",
+                "EQ": "所有者权益变动表", "NOTE": "财务报表附注",
+                "MDNA": "管理层讨论与分析"}
+STATEMENT_ORDER = ("BS", "IS", "CF", "EQ", "NOTE", "MDNA")
 
 # 模型评价段落的固定免责声明（由程序渲染，不由模型产出，避免与报告正文重复）
 COMMENT_DISCLAIMER = ("本段由模型基于程序提取与派生计算的数据生成，仅供参考，"
                       "不构成投资建议，请结合原始披露人工复核。")
 
 
+def _csi_caveat(csi: dict) -> str:
+    """CSI 口径提示：口径未裁定（provisional）或存在全「不适用」维度时必须显式标注。
+
+    ★ 满分 ≠ 全部维度通过校验：某维度可执行规则数为 0 时，其权重被按比例分摊到
+      其余维度，CSI 只反映"可执行维度"的得分，属**临时/不完整**结果，
+      不得被读成整体一致性的最终结论。无可标注内容时返回空串。
+    """
+    csi = csi or {}
+    na = list(csi.get("na_dimensions") or [])
+    parts = []
+    if csi.get("provisional"):
+        parts.append(f"口径状态：临时（provisional，profile={csi.get('profile') or '默认'}），"
+                     f"评分权重与容差档位待业务负责人裁定，非最终业务评分。")
+    if na:
+        parts.append(f"本 CSI 为「临时/不完整」结果：{'、'.join(na)} 共 {len(na)} 个维度无规则可执行"
+                     f"（全部为「不适用」），其权重已按比例分摊至其余维度；"
+                     f"CSI 仅反映可执行维度的得分，不等同于全部维度均通过校验。")
+    return "　".join(parts)
+
+
+def _csi_exec_note(csi: dict) -> str:
+    """CSI 可执行维度数统计：显式给出「可执行维度 / 总维度」，避免满分被误读为全维度通过。
+
+    只统计 csi["dimensions"] 里 rules_applicable > 0 的维度数，**不重算任何得分**。
+    """
+    dims = (csi or {}).get("dimensions") or {}
+    total = len(dims)
+    exe = sum(1 for v in dims.values() if (v or {}).get("rules_applicable"))
+    txt = f"可执行维度 {exe} 个 / 共 {total} 个维度。"
+    if total - exe:
+        txt += (f"另有 {total - exe} 个维度无可执行规则，按「不适用」处理，"
+                f"其权重已按比例分摊至其余维度。")
+    return txt
+
+
+def _fields_by_statement(fields: list[dict]) -> list[tuple[str, str, list[dict]]]:
+    """把提取字段按所属报表分类 → [(statement, 中文名, 记录列表), ...]（按固定顺序）。
+
+    statement 取自解析记录（BS/IS/CF/EQ/NOTE/MDNA）；缺失或未知的归入「其他」。
+    """
+    buckets: dict[str, list[dict]] = {}
+    for r in fields or []:
+        buckets.setdefault(str(r.get("statement") or "OTHER"), []).append(r)
+    order = [k for k in STATEMENT_ORDER if k in buckets]
+    order += [k for k in buckets if k not in STATEMENT_ORDER]
+    return [(k, STATEMENT_ZH.get(k, "其他"), buckets[k]) for k in order]
+
+
+def _analysis_groups(analysis: dict) -> list[tuple[str, str, list[dict]]]:
+    """财务分析指标按 group 归类 → [(group, 中文名, 指标列表), ...]，空组不返回。"""
+    from src.financial_analysis import GROUP_ZH, group_metrics
+    from src.forecast import GROUP_ZH as FC_ZH
+    labels = {**GROUP_ZH, **FC_ZH}
+    grouped = group_metrics((analysis or {}).get("metrics") or [])
+    order = list(GROUP_ZH) + list(FC_ZH)
+    return [(g, labels.get(g, g), grouped[g]) for g in order if grouped.get(g)]
+
+
+def _accuracy(model: dict) -> dict | None:
+    """结构化提取准确率 E：以人工标准答案（data/gold_standard/*.json）为分母逐条比对。
+
+    ★ 覆盖范围必须显式标注：金标准只覆盖特定公司/期间的关键字段，因此这里的 E 是
+      「关键字段抽样准确率」，不等于字段字典全量准确率；同时给出金标准覆盖率
+      （金标准条目数 ÷ 字段字典项数），避免把抽样 E 读成全量结论。
+      找不到与本次运行匹配的金标准（关键字段重合不足）时返回 None，报告写明原因。
+    """
+    fields = model.get("fields") or []
+    gold_dir = ROOT / "data" / "gold_standard"
+    if not fields or not gold_dir.exists():
+        return None
+    keys = {(r.get("item_code"), r.get("period")) for r in fields}
+    best = None
+    for p in sorted(gold_dir.glob("*.json")):
+        gold = _read(p)
+        ents = (gold or {}).get("entries") or []
+        if not ents:
+            continue
+        hit = sum(1 for e in ents if (e.get("item_code"), e.get("period")) in keys)
+        cov = hit / len(ents)                     # 关键字段重合度
+        # 重合不足视为"不是同一份材料"，不得拿来算分——否则是张冠李戴
+        if cov < 0.5:
+            continue
+        if best is None or cov > best[2]:
+            best = (p, gold, cov)
+    if best is None:
+        return None
+    p, gold, cov = best
+    from tools.check_accuracy import compare
+    res = compare(gold, fields)
+    try:
+        import yaml
+        dict_size = len(yaml.safe_load(
+            (ROOT / "rules" / "fields.yaml").read_text(encoding="utf-8"))["fields"])
+    except Exception:                                        # noqa: BLE001
+        dict_size = None
+    res["gold_file"] = p.name
+    res["gold_entries"] = len(gold["entries"])
+    res["match_ratio"] = round(cov, 4)
+    res["dict_size"] = dict_size
+    res["dict_coverage"] = (round(len(gold["entries"]) / dict_size, 4)
+                            if dict_size else None)
+    return res
+
+
+def _accuracy_scope(acc: dict | None) -> list[str]:
+    """提取准确率的**事实陈述**（数值 + 口径 + 覆盖范围），三种报告共用同一份文案。"""
+    if not acc:
+        return ["本次运行没有与之匹配的人工标准答案（data/gold_standard/），"
+                "未计算提取准确率 E；该指标属人工抽样核查，不影响上述规则结论。"]
+    cov = acc.get("dict_coverage")
+    cov_txt = f"{cov * 100:.1f}%" if cov is not None else "—"
+    return [
+        f"结构化提取准确率 E = {acc.get('E')}%（正确 {acc.get('correct')} ÷ "
+        f"应提取 {acc.get('total')}；错误 {acc.get('wrong')} 条、缺失 {acc.get('missing')} 条）。",
+        f"口径与覆盖范围：真值取自人工标准答案《{acc.get('gold_file')}》"
+        f"（{acc.get('gold_entries')} 条关键字段）；字段字典共 {acc.get('dict_size') or '—'} 项，"
+        f"金标准覆盖率 {cov_txt}。",
+        "★ 因此本 E 为「关键字段抽样准确率」，不等同于字段字典全量准确率；"
+        "未列入金标准的字段需人工核对，本报告不对其做自动判定。",
+    ]
+
+
 def _commentary_sections(text: str) -> list[list[str]]:
     """把模型输出的「【小节名】正文」多行文本拆成 [[小节名, 正文], ...]。
 
-    对齐券商点评研报的骨架：小节名固定为 核心观点/经营情况/盈利质量/一致性核查/风险提示。
+    对齐券商点评研报的骨架：小节名固定为 收入分析/盈利能力/现金流/风险提示（四模块）。
     不以「【】」开头的行并入上一小节；首行即无标题时按无标题正文处理。
     """
     out: list[list[str]] = []
@@ -117,6 +244,18 @@ def collect(run_id: str) -> dict:
     # 成段结论：由已完成聚合的计数与比对结果生成，供三种报告共用同一份文案
     model["summary"] = build_summary(model)
     model["research_review"] = build_research_review(model)
+    # 确定性财务分析（盈利能力/费用率/趋势/结构）：由提取字段直接计算，无模型参与
+    from src.financial_analysis import analyze as analyze_financials
+    from src.forecast import forecast as forecast_financials
+    analysis = analyze_financials(fields)
+    fc = forecast_financials(fields)
+    # 盈利预测（情景测算，选题4基础）：并入「财务比率分析」章节末尾，与比率共用同一渲染路径
+    analysis["metrics"] = (analysis.get("metrics") or []) + (fc.get("metrics") or [])
+    analysis["warnings"] = (analysis.get("warnings") or []) + (fc.get("warnings") or [])
+    model["analysis"] = analysis
+    model["forecast"] = fc
+    # 提取准确率 E：以人工标准答案为分母，无匹配金标准时为 None（报告写明原因）
+    model["accuracy"] = _accuracy(model)
     return model
 
 
@@ -322,24 +461,49 @@ def render_pdf(model: dict, path: Path) -> Path:
         ["规则结果数", str(model["counts"]["rules_total"])],
     ], widths=[35 * mm, 130 * mm]))
 
-    # 3 数据提取结果
-    story.append(Paragraph("二、数据提取结果（部分）", h2))
+    # 3 数据提取结果（按报表类型分类展示）
+    story.append(Paragraph("二、数据提取结果（按报表分类）", h2))
     if model["fields"]:
-        rows = [["科目", "期间", "数值", "定位"]]
-        for r in model["fields"][:12]:
-            loc = f"p{r['page']}" if r.get("page") is not None else (r.get("locator") or "—")
-            rows.append([r.get("item_raw", r.get("item_code", "")), str(r.get("period", "")),
-                         r.get("value", ""), loc])
-        story.append(tbl(rows, widths=[46 * mm, 26 * mm, 48 * mm, 45 * mm]))
-        if len(model["fields"]) > 12:
-            story.append(Paragraph(f"（共 {len(model['fields'])} 条，此处仅列前 12 条；"
-                                   f"完整清单见 Excel 版）", small))
+        for stmt, zh, recs in _fields_by_statement(model["fields"]):
+            story.append(Paragraph(f"{zh}（{len(recs)} 条）", h3))
+            rows = [["科目", "期间", "数值", "定位"]]
+            for r in recs:
+                loc = f"p{r['page']}" if r.get("page") is not None else (r.get("locator") or "—")
+                rows.append([r.get("item_raw", r.get("item_code", "")), str(r.get("period", "")),
+                             r.get("value", ""), loc])
+            story.append(tbl(rows, widths=[46 * mm, 26 * mm, 48 * mm, 45 * mm]))
+        story.append(Paragraph(
+            f"本节按报表类型分类列出全部 {len(model['fields'])} 条提取记录（表格跨页自动续表）；"
+            f"机读清单见 Excel 版「提取字段」页。", small))
     else:
         story.append(Paragraph("未提取到字段记录。", body))
 
-    # 4/5/6/7 异常清单（含证据与差异过程）
+    # 4 财务比率分析（程序确定性计算，无模型参与、可复现）
     story.append(PageBreak())
-    story.append(Paragraph("三、异常问题清单（含证据与差异计算过程）", h2))
+    story.append(Paragraph("三、财务比率分析", h2))
+    analysis = model.get("analysis") or {}
+    groups = _analysis_groups(analysis)
+    if groups:
+        for _g, gzh, metrics in groups:
+            story.append(Paragraph(gzh, h3))
+            rows = [["指标", "期间", "数值", "口径说明"]]
+            for m in metrics:
+                rows.append([m.get("name", ""), str(m.get("period", "")),
+                             f"{m.get('value','')}{m.get('unit','')}", m.get("basis", "")])
+            story.append(tbl(rows, widths=[36 * mm, 22 * mm, 26 * mm, 81 * mm]))
+    else:
+        story.append(Paragraph(
+            "本次运行没有可计算财务比率的基础字段（如营业收入/营业成本/所有者权益等），未产出比率分析。",
+            body))
+    for w in analysis.get("warnings") or []:
+        story.append(Paragraph("· " + _esc(w), small))
+    if analysis.get("warnings"):
+        story.append(Paragraph(
+            "以上提示表示相应指标因输入缺失未予计算，不含推算或估计值。", small))
+
+    # 5/6/7/8 异常清单（含证据与差异过程）
+    story.append(PageBreak())
+    story.append(Paragraph("四、异常问题清单（含证据与差异计算过程）", h2))
     if model["anomalies"]:
         for i, a in enumerate(model["anomalies"], 1):
             ev = a.get("evidence") or {}
@@ -359,7 +523,7 @@ def render_pdf(model: dict, path: Path) -> Path:
 
     # 研报引用异常
     if model["research_fail"]:
-        story.append(Paragraph("四、研报引用异常", h2))
+        story.append(Paragraph("五、研报引用异常", h2))
         rows = [["科目", "期间", "研报值", "财报值", "差异", "归因"]]
         for r in model["research_fail"]:
             rows.append([r.get("item_code", ""), str(r.get("period", "")),
@@ -390,7 +554,7 @@ def render_pdf(model: dict, path: Path) -> Path:
 
     # 11/12/13 量化评价
     story.append(PageBreak())
-    story.append(Paragraph("五、一致性量化评价", h2))
+    story.append(Paragraph("六、一致性量化评价", h2))
     csi = model["csi"]
     if csi:
         rows = [["维度", "含义", "可执行", "通过", "异常", "待复核", "不适用", "得分"]]
@@ -411,11 +575,35 @@ def render_pdf(model: dict, path: Path) -> Path:
             f"归一化权重：{json.dumps(csi.get('weights_normalized', {}), ensure_ascii=False)}<br/>"
             f"不适用维度：{','.join(csi.get('na_dimensions') or []) or '无'}　"
             f"（{csi.get('note','')}）", small))
+        # 可执行维度数统计：显式标注可执行维度 / 总维度，避免满分被误读为全维度通过
+        story.append(Spacer(1, 3))
+        story.append(Paragraph(f"<b>【可执行维度】</b>{_esc(_csi_exec_note(csi))}", small))
+        caveat = _csi_caveat(csi)
+        if caveat:
+            story.append(Spacer(1, 3))
+            story.append(Paragraph(f"<b>【口径提示】</b>{_esc(caveat)}", small))
     else:
         story.append(Paragraph("本次运行无可执行的规则，未计算 CSI。", body))
 
+    # 11 提取准确率（E）：以人工标准答案为分母，并如实标注覆盖范围
+    acc = model.get("accuracy")
+    story.append(Paragraph("七、提取准确率（E）", h2))
+    for t in _accuracy_scope(acc):
+        story.append(Paragraph(_esc(t), body if t.startswith("结构化") else small))
+    if acc:
+        bad = [d for d in (acc.get("details") or []) if d["判定"] != "正确"][:15]
+        if bad:
+            rows = [["判定", "科目", "期间", "标准值", "提取值"]]
+            for d in bad:
+                rows.append([d["判定"], d["item_code"], str(d["period"]),
+                             d["标准值"], str(d["提取值"])])
+            story.append(tbl(rows, widths=[16 * mm, 34 * mm, 26 * mm, 45 * mm, 43 * mm]))
+        else:
+            story.append(Paragraph("列入金标准的关键字段全部提取正确。", small))
+    story.append(Spacer(1, 6))
+
     # 8 风险提示 / 9 修改建议 / 10 人工复核
-    story.append(Paragraph("六、风险提示与人工复核", h2))
+    story.append(Paragraph("八、风险提示与人工复核", h2))
     story.append(Paragraph(
         "1. 本报告仅反映材料内部的一致性与引用关系，<b>不构成审计意见</b>。<br/>"
         "2. 标记为「需人工复核」的条目表示程序无法确定，<b>不代表存在错误</b>。<br/>"
@@ -474,9 +662,28 @@ def render_xlsx(model: dict, path: Path) -> Path:
         ("提取字段数", len(model["fields"])),
         ("规则结果数", model["counts"]["rules_total"]),
         ("CSI", csi.get("csi")), ("等级", f"{csi.get('grade','')} {csi.get('grade_label','')}"),
-        ("声明", DISCLAIMER),
     ]:
         ws.append([k, v])
+    caveat = _csi_caveat(csi)
+    if caveat:
+        ws.append(["CSI 口径提示", caveat])
+        ws.cell(ws.max_row, 2).alignment = Alignment(wrap_text=True, vertical="top")
+    if csi:
+        ws.append(["CSI 可执行维度", _csi_exec_note(csi)])
+        ws.cell(ws.max_row, 2).alignment = Alignment(wrap_text=True, vertical="top")
+    # 提取准确率：与 PDF/网页一致，无论有无金标准都给出该行（无金标准时写明原因）
+    acc = model.get("accuracy")
+    if acc:
+        cov = acc.get("dict_coverage")
+        cov_txt = f"{cov * 100:.1f}%" if cov is not None else "—"
+        acc_txt = (f"{acc.get('E')}%（正确 {acc.get('correct')}/{acc.get('total')}，"
+                   f"金标准 {acc.get('gold_entries')} 条，字段字典覆盖率 {cov_txt}）"
+                   f"——属关键字段抽样准确率，非字段字典全量准确率")
+    else:
+        acc_txt = "本次运行没有匹配的人工标准答案（data/gold_standard/），未计算提取准确率 E"
+    ws.append(["提取准确率", acc_txt])
+    ws.cell(ws.max_row, 2).alignment = Alignment(wrap_text=True, vertical="top")
+    ws.append(["声明", DISCLAIMER])
     # 核查总评 / 研报差异点评 / 大模型评价：成段文本整段落入单元格并自动换行，Excel 里也能直接读到结论
     comment = (model.get("commentary") or {}).get("text", "")
     for label, paras in (("核查总评", model.get("summary") or []),
@@ -516,6 +723,25 @@ def render_xlsx(model: dict, path: Path) -> Path:
             r.get("value"), r.get("unit_raw"),
             r.get("page") if r.get("page") is not None else r.get("locator"),
             r.get("raw_text")] for r in model["fields"]])
+
+    # 财务比率分析（程序确定性计算，无模型参与）：新增独立表页
+    yuan = [["分组", "指标", "期间", "数值", "单位", "口径说明"]]
+    for _g, gzh, metrics in _analysis_groups(model.get("analysis") or {}):
+        for m in metrics:
+            yuan.append([gzh, m.get("name", ""), str(m.get("period", "")),
+                         m.get("value", ""), m.get("unit", ""), m.get("basis", "")])
+    ws = sheet("财务比率分析", ["分组", "指标", "期间", "数值", "单位", "口径说明"],
+               yuan[1:])
+    for w in (model.get("analysis") or {}).get("warnings") or []:
+        ws.append(["提示", w, "", "", "", ""])
+    ws.column_dimensions["F"].width = 60
+
+    # 提取准确率明细（以人工标准答案逐条比对）
+    if model.get("accuracy"):
+        sheet("提取准确率", ["判定", "科目", "原文科目", "期间", "标准值", "提取值", "核对依据"],
+              [[d["判定"], d["item_code"], d["item_raw"], d["period"],
+                d["标准值"], d["提取值"], d["核对依据"]]
+               for d in model["accuracy"]["details"]])
 
     # 研报引用
     rc = (model["research"] or {}).get("results", [])
@@ -599,7 +825,36 @@ def render_html(model: dict, path: Path) -> Path:
          ["提取字段数", len(model["fields"])],
          ["规则结果数", model["counts"]["rules_total"]]]))
 
-    sections.append("<h2>二、异常问题清单（含证据与差异过程）</h2>")
+    # 数据提取结果（按报表类型分类展示）
+    sections.append("<h2>二、数据提取结果（按报表分类）</h2>")
+    if model["fields"]:
+        for _stmt, zh, recs in _fields_by_statement(model["fields"]):
+            sections.append(f"<h3>{_esc(zh)}（{len(recs)} 条）</h3>" + _table(
+                ["科目", "期间", "数值", "定位"],
+                [[r.get("item_raw", r.get("item_code", "")), str(r.get("period", "")),
+                  r.get("value", ""),
+                  f"p{r['page']}" if r.get("page") is not None else (r.get("locator") or "—")]
+                 for r in recs]))
+    else:
+        sections.append("<p>未提取到字段记录。</p>")
+
+    # 财务比率分析（程序确定性计算，无模型参与、可复现）
+    analysis = model.get("analysis") or {}
+    sections.append("<h2>三、财务比率分析</h2>")
+    if _analysis_groups(analysis):
+        for _g, gzh, metrics in _analysis_groups(analysis):
+            sections.append(f"<h3>{_esc(gzh)}</h3>" + _table(
+                ["指标", "期间", "数值", "口径说明"],
+                [[m.get("name", ""), str(m.get("period", "")),
+                  f"{m.get('value','')}{m.get('unit','')}", m.get("basis", "")]
+                 for m in metrics]))
+    else:
+        sections.append("<p>本次运行没有可计算财务比率的基础字段（如营业收入/营业成本/"
+                        "所有者权益等），未产出比率分析。</p>")
+    for w in analysis.get("warnings") or []:
+        sections.append(f'<p class="meta">{_esc(w)}</p>')
+
+    sections.append("<h2>四、异常问题清单（含证据与差异过程）</h2>")
     if model["anomalies"]:
         sections.append(_table(
             ["状态", "规则", "维度", "计算式", "差异", "容差", "证据定位", "原文片段", "修改建议"],
@@ -616,7 +871,7 @@ def render_html(model: dict, path: Path) -> Path:
         sections.append("<p>本次运行未发现异常。</p>")
 
     if model["research_fail"]:
-        sections.append("<h2>三、研报引用异常</h2>" + _table(
+        sections.append("<h2>五、研报引用异常</h2>" + _table(
             ["状态", "科目", "期间", "研报原文", "研报值", "财报值", "差异", "归因"],
             [[r.get("status"), r.get("item_code"), r.get("period"),
               (r.get("left") or {}).get("raw"), (r.get("left") or {}).get("value"),
@@ -644,7 +899,7 @@ def render_html(model: dict, path: Path) -> Path:
 
     csi = model["csi"] or {}
     if csi:
-        sections.append("<h2>四、一致性量化评价</h2>")
+        sections.append("<h2>六、一致性量化评价</h2>")
         sections.append(f'<div class="csi">CSI = {csi.get("csi")}　'
                         f'等级 {csi.get("grade")}（{csi.get("grade_label","")}）</div>')
         sections.append(_table(
@@ -658,8 +913,27 @@ def render_html(model: dict, path: Path) -> Path:
             f'原权重 {_esc(json.dumps(csi.get("weights_used", {}), ensure_ascii=False))}　'
             f'归一化 {_esc(json.dumps(csi.get("weights_normalized", {}), ensure_ascii=False))}<br/>'
             f'不适用维度：{_esc(",".join(csi.get("na_dimensions") or []) or "无")}</p>')
+        sections.append(f'<p><b>【可执行维度】</b>{_esc(_csi_exec_note(csi))}</p>')
+        caveat = _csi_caveat(csi)
+        if caveat:
+            sections.append(f'<p class="warn"><b>【口径提示】</b>{_esc(caveat)}</p>')
 
-    sections.append("<h2>五、风险提示与人工复核</h2>"
+    # 提取准确率（E）：以人工标准答案为分母，并如实标注覆盖范围
+    acc = model.get("accuracy")
+    sections.append("<h2>七、提取准确率（E）</h2>")
+    for i, t in enumerate(_accuracy_scope(acc)):
+        cls = ' class="csi"' if i == 0 else ""
+        sections.append(f"<p{cls}>{_esc(t)}</p>")
+    if acc:
+        bad = [d for d in (acc.get("details") or []) if d["判定"] != "正确"][:15]
+        if bad:
+            sections.append(_table(["判定", "科目", "期间", "标准值", "提取值"],
+                                   [[d["判定"], d["item_code"], str(d["period"]),
+                                     d["标准值"], str(d["提取值"])] for d in bad]))
+        else:
+            sections.append("<p>列入金标准的关键字段全部提取正确。</p>")
+
+    sections.append("<h2>八、风险提示与人工复核</h2>"
                     "<p>1. 本报告仅反映材料内部一致性与引用关系，<b>不构成审计意见</b>。<br/>"
                     "2. 「需人工复核」表示程序无法确定，<b>不代表存在错误</b>。<br/>"
                     "3. 差异可能源于列报口径、会计政策变更或四舍五入，须结合原始披露判断。</p>")

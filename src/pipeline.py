@@ -297,9 +297,13 @@ def run_commentary(records: list[dict], rule_res: list[dict],
     #   随 payload 一起喂给模型，其数值自动进入数字白名单；
     #   模型只负责组织语言，不得自行做任何运算。
     derived = compute_derived(records)
+    # 确定性财务分析（盈利能力/费用率/趋势/结构），同样作为上下文喂给模型；
+    # 与 derived 同 code 的条目在 build_gen_commentary 内按 code 去重（derived 优先）。
+    from src.financial_analysis import analyze as analyze_financials
+    analysis = analyze_financials(records)
 
     payload = build_gen_commentary(metrics, csi or {}, anomalies, research_fail,
-                                   (csi or {}).get("grade_label", ""), derived)
+                                   (csi or {}).get("grade_label", ""), derived, analysis)
     allowed = collect_allowed_numbers(payload)
     out, status = call_task("gen_commentary", payload, run_id, offline=offline,
                             context={"allowed_numbers": allowed}, api_key=api_key)
@@ -307,6 +311,8 @@ def run_commentary(records: list[dict], rule_res: list[dict],
         "run_id": run_id,
         "status": status,
         "derived_count": len(derived),
+        "analysis_count": len(analysis.get("metrics") or []),
+        "analysis_warnings": analysis.get("warnings") or [],
         "text": (out or {}).get("text", "") if out else "",
     })
     return status
@@ -331,6 +337,11 @@ def run(config_path: str, offline: bool = False, run_id: str = "demo",
     operator = cfg.get("run", {}).get("user", "team")
 
     records = load_structured(data_dir)
+    # 研报比对另有可用指标：程序确定性计算的比率（毛利率/净利率/资产负债率）。
+    # 只喂给"研报匹配 + C研 比对"，不动 match_item 与规则引擎的输入——
+    # 比率不是财报原文科目，混进规则引擎会造成无意义的 NA。
+    from src.derived import ratio_records
+    check_records = records + ratio_records(records)
 
     # 运行清单：只记元信息，不记密钥、不记财报正文
     _, meta_item = load_prompt("match_item")
@@ -343,14 +354,14 @@ def run(config_path: str, offline: bool = False, run_id: str = "demo",
     # 1. 科目归一化（财报原文科目名 → 标准科目编号）
     _, s_item = run_match_item(records, run_id, offline, api_key=api_key)
     # 2. 研报引用匹配（claim 句子 → 科目+期间）：模型只答"在说哪个指标"
-    claim_matches, s_claim = (run_match_claim(claims_path, records, run_id, offline,
+    claim_matches, s_claim = (run_match_claim(claims_path, check_records, run_id, offline,
                                               api_key=api_key)
                               if claims_path else (None, "NOT_CONFIGURED"))
     # 2b. C研 维度数值比对（确定性计算，模型不参与，见 src/research_check.py）
     s_research = "SKIPPED"
     rc = None
     if claim_matches:
-        rc = run_research_check(claims_path, claim_matches, records, run_id)
+        rc = run_research_check(claims_path, claim_matches, check_records, run_id)
         s_research = "PASS={}/FAIL={}/REVIEW={}".format(
             sum(1 for r in rc["results"] if r["status"] == "PASS"),
             sum(1 for r in rc["results"] if r["status"] == "FAIL"),

@@ -57,6 +57,11 @@ LABEL_ALIASES = {
     "应收账款": ("AR_NET", "BS", "BAL_END"),
     "存货": ("INVENTORY", "BS", "BAL_END"),
     "固定资产": ("FIXED_ASSETS", "BS", "BAL_END"),
+    # v1.2：研报高频引用的资产负债表科目
+    "合同负债": ("CONTRACT_LIAB", "BS", "BAL_END"),
+    "应付账款": ("AP", "BS", "BAL_END"),
+    "短期借款": ("SHORT_TERM_LOAN", "BS", "BAL_END"),
+    "长期借款": ("LONG_TERM_LOAN", "BS", "BAL_END"),
     "营业总收入": ("TOTAL_REVENUE", "IS", "FY"),
     "营业收入": ("REVENUE", "IS", "FY"),
     "营业成本": ("OPERATING_COST", "IS", "FY"),
@@ -66,6 +71,12 @@ LABEL_ALIASES = {
     "净利润": ("NET_PROFIT", "IS", "FY"),
     "归属于母公司股东的净利润": ("NP_PARENT", "IS", "FY"),
     "归属于母公司所有者的净利润": ("NP_PARENT", "IS", "FY"),
+    # v1.2：研报高频引用的利润表科目
+    "销售费用": ("SELLING_EXPENSE", "IS", "FY"),
+    "管理费用": ("ADMIN_EXPENSE", "IS", "FY"),
+    "研发费用": ("RD_EXPENSE", "IS", "FY"),
+    "财务费用": ("FIN_EXPENSE", "IS", "FY"),
+    "税金及附加": ("TAX_SURCHARGE", "IS", "FY"),
     "经营活动产生的现金流量净额": ("CF_OPERATING", "CF", "FY"),
     "投资活动产生的现金流量净额": ("CF_INVESTING", "CF", "FY"),
     "筹资活动产生的现金流量净额": ("CF_FINANCING", "CF", "FY"),
@@ -170,8 +181,29 @@ SEGMENT_ITEMS: dict[tuple[str, str], tuple[str | None, str | None]] = {
     ("地区", "国外"): ("REVENUE_OVERSEAS", None),
     ("销售模式", "批发代理"): ("REVENUE_WHOLESALE", None),
     ("销售模式", "直销"): ("REVENUE_DIRECT", None),
+    # v1.3：i茅台是自营电商平台，有时单列一行，有时并入"直销"。
+    ("销售模式", "i茅台"): ("REVENUE_IMOUTAI", None),
+    ("销售模式", "i茅台数字营销平台"): ("REVENUE_IMOUTAI", None),
 }
-SEGMENT_HEADING_RE = re.compile(r"主营业务分行业.*分产品|主营业务分产品")
+# ★ 半年报 PDF 常把四个小节标题**分行**写出（"主营业务分行业情况"独占一行），
+#   而年报 PDF 可能合并成一行。原正则要求"分行业"与"分产品"同行出现，
+#   分行写法一律匹配不上 → 分部表整段不被识别（半年报分部字段全缺）。
+#   故放宽为"命中任意一个分部小节标题即认为进入分部区间"；具体行归属仍由
+#   _scan_segment_table 按 SEGMENT_SECTIONS 的小节标题严格判定，不放松归属。
+SEGMENT_HEADING_RE = re.compile(r"主营业务分(?:行业|产品|地区|销售模式)")
+
+# ---- 产销量情况表（第三节，销量口径；吨价由程序按"分部收入 ÷ 销量"计算）----
+# 表形如：
+#   主要产品 | 单位 | 生产量 | 销售量 | 库存量 | 生产量比上年增减 | 销售量比上年增减 …
+#   茅台酒   | 吨   | …      | 46,310.45 | …
+# 取数规则：先在表内定位含"销售量"的表头行并取其列号（从左往右第一个命中即真实销量列，
+# 排在"销售量比上年增减"之前），再按首列科目名取该列数值。表头没有"销售量"就不取，
+# 以免把"生产量/库存量"当成销量。
+VOLUME_HEADING_RE = re.compile(r"产销量")
+VOLUME_VALUE_RE = re.compile(r"^-?[\d,]+(?:\.\d+)?$")
+VOLUME_ROWS = {"茅台酒": "VOLUME_MOUTAI", "系列酒": "VOLUME_SERIES",
+               "其他系列酒": "VOLUME_SERIES", "酒类": "VOLUME_TOTAL"}
+VOLUME_SALE_HEADER = ("销售量", "销量")
 
 # ---- 所有者权益变动表（第十节，规则表 13/15/18 条）----
 # 合并表固定 16 列（母公司表 9 列，不取）。列头是**纵向合并单元格**，
@@ -421,6 +453,38 @@ def _scan_segment_table(rows):
     return out
 
 
+def _scan_volume_table(rows):
+    """产销量情况表 → [(code, value, raw_text, row_no, label)]；表头无"销售量"则整表不取。"""
+    if not rows:
+        return []
+    sale_col = None
+    header_ri = 0
+    for ri, cells in enumerate(rows):
+        for ci, c in enumerate(cells):
+            s = _squash(c)
+            # 取"销售量/销量"列，但排除"销售量比上年增减"这类同比列（含"上年"/"增减"）。
+            if any(h in s for h in VOLUME_SALE_HEADER) and not any(
+                    k in s for k in ("上年", "增减", "同比", "比例")):
+                sale_col, header_ri = ci, ri
+                break
+        if sale_col is not None:
+            break
+    if sale_col is None:
+        return []
+    out = []
+    for ri, cells in enumerate(rows[header_ri + 1:], start=header_ri + 2):
+        if sale_col >= len(cells):
+            continue
+        code = VOLUME_ROWS.get(_squash(cells[0]))
+        if not code:
+            continue
+        v = (cells[sale_col] or "").strip()
+        if not VOLUME_VALUE_RE.match(v):
+            continue
+        out.append((code, v, " | ".join(cells), ri, cells[0].strip()))
+    return out
+
+
 def _scan_equity_table(rows, eq_year):
     """合并所有者权益变动表 → ([(code, value, period, ptype, raw_text, row_no)], 年度)。
 
@@ -501,6 +565,7 @@ def _extract_docx(src_path: Path, year: int, period_ctx: dict | None = None) -> 
     heading = ""
     table_no = 0
     seg_pending = False              # 下一张表是否为主营业务分部表
+    vol_pending = False              # 下一张表是否为产销量情况表
     eq_state = False                 # 当前是否处于合并所有者权益变动表区间
     eq_year: int | None = None       # 当前权益变动表的年度（续表沿用上一张）
 
@@ -523,6 +588,18 @@ def _extract_docx(src_path: Path, year: int, period_ctx: dict | None = None) -> 
                           statement="MDNA",
                           locator=f"第三节 主营业务分部表 / 表#{table_no} / 第{row_no}行",
                           chunk_id=f"s{table_no:03d}_r{row_no:02d}", raw_text=raw_text,
+                          src_name=src_path.name, src_hash=src_hash)
+                continue
+
+            # 产销量情况表（第三节）：紧跟在"产销量情况表"标题后的那张表
+            if vol_pending:
+                vol_pending = False
+                for code, value, raw_text, row_no, label in _scan_volume_table(rows):
+                    _emit(records, chunk_index, seen, code=code, raw=label,
+                          value=value, period=period_ctx["flow_current"], ptype=period_ctx["flow_type"],
+                          statement="MDNA",
+                          locator=f"第三节 产销量情况表 / 表#{table_no} / 第{row_no}行",
+                          chunk_id=f"v{table_no:03d}_r{row_no:02d}", raw_text=raw_text,
                           src_name=src_path.name, src_hash=src_hash)
                 continue
 
@@ -673,6 +750,8 @@ def _extract_docx(src_path: Path, year: int, period_ctx: dict | None = None) -> 
                         skip_until = token_index + EQ_COL_COUNT - 1
             if SEGMENT_HEADING_RE.search(text):
                 seg_pending = True    # 下一张表即主营业务分部表
+            if VOLUME_HEADING_RE.search(text):
+                vol_pending = True    # 下一张表即产销量情况表
             if text in CONSOLIDATED_TITLES:
                 state = CONSOLIDATED_TITLES[text]
                 note = section = sub = None
@@ -719,11 +798,23 @@ def _extract_pdf(pdf_path: Path, year: int, period_ctx: dict | None = None) -> t
     eq_year: int | None = None
     in_equity_section = False
     supplement_pages_remaining = 0
+    note_section: str | None = None      # 当前附注一级小节（跨页延续，与 docx 路径同义）
+    note_sub: str | None = None          # 当前附注子小节
     with pdfplumber.open(pdf_path) as pdf:
         for page_no, page in enumerate(pdf.pages, start=1):
             page_text = page.extract_text() or ""
             page_lines = [ln.strip() for ln in page_text.splitlines() if ln.strip()]
             flat_page = _squash(page_text)
+            # 附注小节状态跨页延续：用于锁定"应收账款 按坏账计提方法分类披露"表，
+            # 排除结构相同但科目不同的"其他应收款"附注、以及同页的"按账龄披露"表。
+            for ln in page_lines:
+                _hm = NOTE_HEADING_RE.match(ln)
+                if _hm:
+                    note_section, note_sub = _hm.group(1), None
+                    continue
+                _sm = NOTE_SUBHEADING_RE.match(ln)
+                if _sm:
+                    note_sub = _sm.group(1)
             if "现金流量表补充资料" in flat_page or "金流量表补充资料" in flat_page:
                 supplement_pages_remaining = 2
             if "合并所有者权益变动表" in flat_page:
@@ -733,6 +824,45 @@ def _extract_pdf(pdf_path: Path, year: int, period_ctx: dict | None = None) -> t
                 in_equity_section = False
                 eq_year = None
             page_tables = _pdf_page_tables(page)
+            # 附注「目标行 + 固定列号」表（应收账款坏账计提，规则 NB02）：PDF 侧同样
+            # 按 (小节, 子小节) 锁定，并要求表内出现"单项计提/组合计提"行——同页的
+            # "按账龄披露"表虽结构相同却无此行，据此排除；宁可判 NA，也不误抽其他科目。
+            _rt = _match_row_target(note_section, note_sub)
+            if _rt:
+                target_row, cur_cols, prev_cols = _rt
+                for nti, ntable in enumerate(page_tables, start=1):
+                    nrows = _pdf_table_rows(ntable)
+                    if not nrows:
+                        continue
+                    flat_note = _squash(" ".join(" ".join(r) for r in nrows))
+                    if "单项计提" not in flat_note and "组合计提" not in flat_note:
+                        continue
+                    hit = False
+                    for ri, cells in enumerate(nrows):
+                        if not cells or _squash(cells[0]) != target_row:
+                            continue
+                        locator = (f"{note_section}（附注）/ {note_sub} / "
+                                   f"PDF第{page_no}页 / 表#{nti} / 第{ri + 1}行")
+                        chunk_id = f"p{page_no:03d}_t{nti:02d}_r{ri + 1:02d}"
+                        for cols, period, balance_period in (
+                                (cur_cols, year, period_ctx["balance_current"]),
+                                (prev_cols, year - 1, period_ctx["balance_previous"])):
+                            for code, ci in cols.items():
+                                if ci >= len(cells):
+                                    continue
+                                cell = (cells[ci] or "").strip()
+                                if not _CELL_VALUE_RE.match(cell):
+                                    continue
+                                _emit(records, chunk_index, seen, code=code,
+                                      raw=cells[0].strip(), value=cell, period=balance_period,
+                                      ptype="BAL_END" if period == year else "BAL_BEG",
+                                      statement="NOTE", locator=locator, chunk_id=chunk_id,
+                                      raw_text=" | ".join(cells), src_name=pdf_path.name,
+                                      src_hash=src_hash)
+                        hit = True
+                        break
+                    if hit:
+                        break
             # MD&A 分部表：标题、列头与数据可能位于同一张表格中；以既有
             # 小节/列头/数据行结构识别，不依赖页码或该段的 OCR 文本顺序。
             if any(SEGMENT_HEADING_RE.search(ln) for ln in page_lines):
@@ -740,6 +870,18 @@ def _extract_pdf(pdf_path: Path, year: int, period_ctx: dict | None = None) -> t
                     rows = _pdf_table_rows(table)
                     for code, value, raw_text, row_no, label in _scan_segment_table(rows):
                         locator = f"PDF第{page_no}页 / 表#{ti} / 第{row_no}行"
+                        chunk_id = f"p{page_no:03d}_t{ti:02d}_r{row_no:02d}"
+                        _emit(records, chunk_index, seen, code=code, raw=label,
+                              value=value, period=period_ctx["flow_current"], ptype=period_ctx["flow_type"], statement="MDNA",
+                              locator=locator, chunk_id=chunk_id, raw_text=raw_text,
+                              src_name=pdf_path.name, src_hash=src_hash)
+
+            # 产销量情况表（第三节）：含"销售量"表头且首列为茅台酒/系列酒时取销量（吨）。
+            if any(VOLUME_HEADING_RE.search(ln) for ln in page_lines):
+                for ti, table in enumerate(page_tables, start=1):
+                    rows = _pdf_table_rows(table)
+                    for code, value, raw_text, row_no, label in _scan_volume_table(rows):
+                        locator = f"第三节 产销量情况表 / PDF第{page_no}页 / 表#{ti} / 第{row_no}行"
                         chunk_id = f"p{page_no:03d}_t{ti:02d}_r{row_no:02d}"
                         _emit(records, chunk_index, seen, code=code, raw=label,
                               value=value, period=period_ctx["flow_current"], ptype=period_ctx["flow_type"], statement="MDNA",

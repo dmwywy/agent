@@ -233,7 +233,7 @@ OpenAI SDK 会抛对应异常，`e.status_code` 取状态码、`e.body` 取上�
 ### 9.1 强制 JSON
 
 请求带 `response_format={"type":"json_object"}`。官方要求提示词中必须出现
-**"json" 字样并给出输出样例**——仓库的 5 个提示词均满足，并有测试守护
+**"json" 字样并给出输出样例**——仓库的 4 个提示词均满足，并有测试守护
 （`test_tasks.py::test_prompt_files_naming` 断言每个提示词含 `json`）。
 
 ### 9.2 三层校验（`src/tasks.py::call_task`）
@@ -380,7 +380,7 @@ item status:  CACHE_HIT | mappings: 22
 
 | 序 | 事项 | 现状 |
 |---|---|---|
-| 1 | `gen_report_text` 的输入构造 | **已补齐**：`src/inputs.py::build_gen_report_text()` 只传定性维度状态、规则/科目编号、状态、等级名称与是否省略标记；不传计数、金额或差额 |
+| 1 | ~~`gen_report_text` 的输入构造~~ | **已作废**：该任务从未被 pipeline 调用（死代码），已于 2026-10-14 连同 `prompts/gen_report_text.txt`、`ReportTextOut`（改由 `gen_commentary` 复用）、`build_gen_report_text()` 一并移除。报告定性文字现由 `gen_commentary` 承担 |
 | 2 | 服务商 SLA | 官方未提供可用性承诺口径，仅提供 [状态页](https://status.deepseek.com/) |
 | 3 | 并发实现 | `concurrency: 2` 是配置声明，代码仍为串行 |
 | 4 | 预算上限 | `max_calls_per_run: 60` 是规划值，尚未在代码中强制执行 |
@@ -425,7 +425,7 @@ item status:  CACHE_HIT | mappings: 22
 
 | 项 | 当前值 |
 |---|---|
-| 提示词文件 | `prompts/{match_item,unit_period,match_claim,explain_anomaly,gen_report_text}.txt` |
+| 提示词文件 | `prompts/{match_item,match_claim,explain_anomaly,gen_commentary}.txt`（4 个；2026-10-14 移除未接入的 `unit_period` / `gen_report_text`） |
 | 提示词内容哈希 | 每次运行写入 `runs/<run_id>/manifest.json` 的 `prompts[].sha256` |
 | 模型标识 | `deepseek-flash` |
 | 推理参数 | `temperature=0, top_p=1, max_tokens=8000, stream=false, thinking={"type":"disabled"}` |
@@ -438,6 +438,6 @@ item status:  CACHE_HIT | mappings: 22
 - 请求模型标识、Endpoint、认证、超时、重试及服务错误结构沿用本文件 §1–§8，并与 `src/llm.py` 一致；模型产品名为 DeepSeek-V4.1-Flash，请求 `model` 值仍为 `deepseek-flash`。
 - `match_claim` 的期间编码遵循项目接口：时期用 `2024`，时点用 `2024-12-31`，不使用 `FY2024`。
 - `match_item` 与 `match_claim` 不返回 `evidence`；程序从解析器结果确定性回填。`match_claim` 的最小模型输出应为 `{"ok":true,"matches":[{"claim_id":"demo-001","item_code":"REVENUE","period":"2024","confidence":0.95,"reason":"句子提到营业收入"}]}`。
-- `gen_report_text` 输入构造已实现并收紧为定性内容，避免把维度计数（数字）传给模型。其最小输入/输出示例见仓库根目录 `offline_mock_input.json` 与 `offline_mock_output.json`。
+- ~~`gen_report_text` 输入构造已实现并收紧为定性内容~~：该任务已于 2026-10-14 移除（未被 pipeline 调用），契约内不再有该任务；报告定性文字统一由 `gen_commentary` 产出并做数字白名单校验。仓库根目录 `offline_mock_input.json` 与 `offline_mock_output.json` 仍以 `match_item` / `match_claim` 为例。
 - 服务端错误 envelope 为 `error.message/type/param/code`；客户端按 HTTP 状态码分类，不依赖 `error.code`。
 - 财务字段映射、期间转换表、容差优先级/floor 取整及 CF01 业务公式均不属于模型接口契约；保持项目组业务资料原样，待对应部门决定。

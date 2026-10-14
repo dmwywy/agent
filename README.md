@@ -160,9 +160,10 @@ macOS / Linux：
 
 ### 4. 返回结构与证据校验
 
-    python test_schema_roundtrip.py
+    python -m pytest test_tasks.py -q
 
-用真实模型输出验证 schema 校验路径与证据真实性校验。
+用真实模型输出验证 schema 校验路径与证据真实性校验（原独立脚本
+`test_schema_roundtrip.py` 的用例已并入 `test_tasks.py`，随全量测试一起跑）。
 
 ### 5. 密钥配置诊断
 
@@ -267,6 +268,13 @@ macOS / Linux：
 
 这两段由程序按确定性模板从已有产物生成，**不新增模型调用**，离线同样可复现。
 
+**报告结构增强（2026-10-14）**：① 数据提取结果**按报表类型分组展示**
+（资产负债表 / 利润表 / 现金流量表 / 所有者权益 / 附注 / 分部，各成小节）；
+② 新增独立的**「财务比率分析」章节**，按「盈利能力 / 费用率 / 趋势 / 结构 /
+盈利预测（情景测算）」分组渲染 `src/financial_analysis.py` 与 `src/forecast.py`
+的确定性计算结果；③ 一致性量化评价节新增 **CSI 可执行维度数统计**
+（「可执行维度 X 个 / 共 Y 个维度」，X 为 `rules_applicable>0` 的维度数，不重算得分）。
+
 跑完不想生成报告可加 `--no-report`。
 
 ### 9. 网页界面
@@ -354,7 +362,7 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
 
     python -m pytest -q
 
-**当前状态（2026-10-14）**：收集 **84** 项 / **全部通过（84 passed / 0 failed）**。
+**当前状态（2026-10-14）**：收集 **103** 项 / **全部通过（103 passed / 0 failed）**。
 此前唯一红项 `test_web_app_handles_run_without_report` 已修复：`app.py` 报告下载页
 原先把「有没有报告」的判断与提示**一并**放进 `if tab5.open:` 惰性页签渲染门控，
 未打开该页签时 `streamlit.testing` 的 AppTest 取不到该提示文案；现改为只对
@@ -423,7 +431,7 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
 4. 运行：
 
        python test.py
-       python test_schema_roundtrip.py
+       python -m pytest test_tasks.py -q
 
 5. 预期结果：输出内容与 `runs/demo_baseline/` 中记录的结果一致，且全程未联网、未使用密钥。
 
@@ -449,39 +457,50 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     ├── check_key.py          密钥配置诊断
     ├── test.py               最小调用测试
     ├── testcontract.py       契约自检
-    ├── test_schema_roundtrip.py  返回结构与证据校验
-    ├── test_tasks.py         任务 / 提示词 / 校验测试
+    ├── test_tasks.py         任务 / 提示词 / 校验测试（含返回结构与证据校验）
     ├── fincheck/
     │   └── __main__.py       CLI 入口：run / ingest / report 与运行摘要
     ├── configs/
     │   ├── demo.yaml         初赛运行配置
-    │   └── model.yaml        模型与推理参数声明
+    │   └── model.yaml        模型与推理参数声明（`src/llm.py` 启动时加载）
     ├── docs/
     │   ├── interfaces.md     接口契约
     │   ├── model_adapter_contract.md  模型接口确认版
     │   ├── model_plan.md / model_plan_simple.md  模型调用方案
     │   ├── third_party.md    第三方依赖与模型清单
     │   ├── 决赛交付与模块映射.md  模块映射与缺口说明
+    │   ├── MCP接口设计.md    MCP 模块接口设计（规划中，未接入运行时）
     │   └── evidence/         验证与演练截图
-    ├── prompts/              5 个提示词（内容哈希写入 manifest）
+    ├── prompts/              4 个提示词（内容哈希写入 manifest）
     │   ├── match_item.txt    科目归一化
-    │   ├── unit_period.txt   单位 / 期间 / 口径识别
     │   ├── match_claim.txt   研报引用匹配
     │   ├── explain_anomaly.txt  异常原因解释
-    │   └── gen_report_text.txt  报告定性文字
+    │   └── gen_commentary.txt   报告定性文字（研报式评价）
+    ├── skills/               8 个 SKILL.md（声明式，不接入运行时）
+    │   ├── match_item/SKILL.md     科目归一化
+    │   ├── match_claim/SKILL.md    研报引用匹配
+    │   ├── explain_anomaly/SKILL.md 异常原因解释
+    │   ├── gen_commentary/SKILL.md  报告定性文字（研报式评价）
+    │   ├── financial-ratio-calculator/SKILL.md  财务比率计算（确定性）
+    │   ├── consistency-checker/SKILL.md         一致性核查（封装 27 条规则）
+    │   ├── field-extractor/SKILL.md             字段提取
+    │   └── report-generator/SKILL.md            报告生成
     ├── rules/
     │   ├── fields.yaml       字段字典
     │   ├── rules.yaml        规则配置（27 条）
     │   └── tolerance.yaml    容差配置
-    ├── src/                  16 个模块
+    ├── src/                  19 个模块
     │   ├── llm.py            模型调用闸门（缓存、重试、JSON 强制输出）
     │   ├── errors.py         错误分类与提示
-    │   ├── inputs.py         5 类模型输入构造
-    │   ├── schemas.py        5 类返回结构契约
+    │   ├── inputs.py         4 类模型输入构造
+    │   ├── schemas.py        4 类返回结构契约
     │   ├── validators.py     三层校验
     │   ├── tasks.py          任务级接口：加载提示词→调用→校验→修复重试
     │   ├── netguard.py       联网白名单与离线自检
     │   ├── pipeline.py       主编排：解析→语义→规则→解释→落盘
+    │   ├── derived.py        确定性派生计算（同比/比率/情景测算）
+    │   ├── financial_analysis.py  确定性财务分析（盈利能力/费用率/趋势/结构）
+    │   ├── forecast.py       盈利预测（分产品外推 + PE 估值情景）
     │   ├── ingest.py         文件夹入口：按内容识别材料
     │   ├── web.py            网页上传→核查→报告共用编排
     │   ├── rules_engine.py   五维规则核查 + CSI 计算

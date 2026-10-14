@@ -67,7 +67,18 @@ ALIASES = {
     "茅台酒": "REVENUE_MOUTAI",
     "系列酒": "REVENUE_SERIES",
     "经营活动产生的现金流量净额": "CF_OPERATING",
+    # v1.2：研报高频指标——补充口语化写法（正式名已由 fields.yaml 的 zh 覆盖）
+    "毛利率": "RATIO_GROSS", "净利率": "RATIO_NET", "资产负债率": "RATIO_LEV",
+    "销售费用": "SELLING_EXPENSE", "管理费用": "ADMIN_EXPENSE",
+    "研发费用": "RD_EXPENSE", "财务费用": "FIN_EXPENSE", "税金及附加": "TAX_SURCHARGE",
+    "合同负债": "CONTRACT_LIAB", "应付账款": "AP",
+    "短期借款": "SHORT_TERM_LOAN", "长期借款": "LONG_TERM_LOAN",
 }
+
+# 比率类指标：真值由程序计算（src.derived.ratio_records），句中数值以百分号为单位，
+# 用专门的百分比解析器归属——与金额解析器分开，避免"增长8%"被误挂到金额科目上。
+RATIO_CODES = {"RATIO_GROSS", "RATIO_NET", "RATIO_LEV"}
+PCT_RE = re.compile(r"(-?)\s*(\d[\d,]*(?:\.\d+)?)\s*%")
 
 # 金额与它的"主语指标名"之间允许的最大字符距离。
 # 没有这个约束，"吨价 314.4 万元"会被挂到远在句首的"茅台酒"上，又变误报。
@@ -163,6 +174,38 @@ def associate_figures(sentence: str, zh_map: dict) -> dict[str, dict]:
     return out
 
 
+def associate_percent(sentence: str, zh_map: dict) -> dict[str, dict]:
+    """比率类指标专用：把句中的百分比关联到它**前面最近**的指标名。
+
+    口径与 associate_figures 一致（同名归属规则、同样的最大间隔约束），
+    只是金额正则换成百分号正则、不做单位量级换算——比率以 % 为唯一单位。
+    """
+    mentions = _mentions(sentence, zh_map)
+    out: dict[str, dict] = {}
+    for m in PCT_RE.finditer(sentence):
+        owner = None
+        for s, e, code in mentions:
+            if e <= m.start() and m.start() - e <= MAX_NAME_GAP:
+                if owner is None or e > owner[1]:
+                    owner = (s, e, code)
+        if owner is None:
+            continue
+        try:
+            val = Decimal(m.group(2).replace(",", ""))
+        except InvalidOperation:
+            continue
+        if m.group(1) == "-":
+            val = -val
+        out.setdefault(owner[2], {
+            "value": val,
+            "raw": sentence[owner[0]:m.end()],
+            "num_raw": m.group(2) + "%",
+            "matched_name": sentence[owner[0]:owner[1]],
+            "bad_unit": "",
+        })
+    return out
+
+
 def tolerance_for(profile: dict, left: Decimal, right: Decimal) -> Decimal:
     """有效容差 = max(abs 下限, rel × max(|左|,|右|))；REPORT_REF 不按单位取下限。"""
     abs_floor = Decimal(str(profile.get("abs", "0")))
@@ -226,7 +269,9 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
         # 单条解析异常不得打断整体流程（与 llm 侧"失败转人工复核"一致）：
         # 某句研报措辞触发解析边界时，只丢这一条，其余照常比对。
         try:
-            figs = associate_figures(sentence, zh_map)
+            # 比率类（毛利率/净利率/资产负债率）用百分号解析，其余科目用金额解析
+            figs = (associate_percent(sentence, zh_map) if code in RATIO_CODES
+                    else associate_figures(sentence, zh_map))
         except Exception as e:                                  # noqa: BLE001
             skipped.append({**base, "status": "REVIEW",
                             "reason": f"句内金额解析异常（{type(e).__name__}: {e}），需人工复核"})

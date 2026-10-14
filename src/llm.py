@@ -11,14 +11,35 @@ from src.logger import log_event
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 
-BASE_URL = "https://api.deepseek.com"
-MODEL_ID = os.getenv("MODEL_ID", "deepseek-flash").strip()
+def _load_model_config() -> dict:
+    """加载 configs/model.yaml —— 模型/推理参数的**声明式真源**。
+
+    文件缺失或解析失败时返回空 dict，调用方沿用下方硬编码默认值：既让已存在的
+    声明式配置真正生效（不再是与代码脱节的死文件），又保证配置缺失仍能出站。
+    """
+    p = ROOT / "configs" / "model.yaml"
+    if not p.exists():
+        return {}
+    try:
+        import yaml
+        return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:                       # noqa: BLE001 - 配置只做增强，不阻断出站
+        log_event("model_config_load_failed", {"path": str(p)})
+        return {}
+
+
+_CFG = _load_model_config()
+
+BASE_URL = (_CFG.get("base_url") or "https://api.deepseek.com").strip()
+# 优先级：环境变量 MODEL_ID > configs/model.yaml 的 model_id > 代码默认值
+MODEL_ID = (os.getenv("MODEL_ID") or _CFG.get("model_id") or "deepseek-flash").strip()
 # ★ 推理参数必须全部写在这里：它们参与缓存键（model_plan.md §2.5）。
 #   若把 max_tokens 单独传给接口而不放进 PARAMS，改了这个值缓存却不会失效，
 #   会命中上一次的旧结果——"结果可复现"就失真了。
 #   deepseek-flash 是**推理模型**：reasoning_content 与正文共享 max_tokens 预算。
 #   改动此值会使既有缓存全部失效，需重跑 runs/demo_baseline/。
 PARAMS = {"temperature": 0, "top_p": 1, "max_tokens": 8000, "stream": False}
+PARAMS.update({k: v for k, v in (_CFG.get("params") or {}).items() if k in PARAMS})
 
 # ★ 深度思考开关。deepseek-flash **默认开启思考**，推理 token 计入 completion_tokens
 #   并与正文共享 max_tokens。实测同一批 claim：
@@ -26,12 +47,17 @@ PARAMS = {"temperature": 0, "top_p": 1, "max_tokens": 8000, "stream": False}
 #       thinking=disabled → completion=242、正常返回 668 字符
 #   相差 33 倍。本项目的模型任务全是"带候选清单的受限分类/映射"（选科目、选期间、选原因），
 #   不需要长链推理，故显式关闭。此参数必须进缓存键（它改变输出）。
-THINKING = {"type": "disabled"}
+THINKING = dict(_CFG.get("thinking") or {"type": "disabled"})
 
 # ---- 模型白名单：写错在启动瞬间报错，不浪费一次请求 ----
-ALLOWED_MODELS = {"deepseek-flash", "deepseek-v4-pro"}
+ALLOWED_MODELS = set(_CFG.get("allowed_models") or ("deepseek-flash", "deepseek-v4-pro"))
 if MODEL_ID not in ALLOWED_MODELS:
-    _origin = "环境变量 MODEL_ID" if os.getenv("MODEL_ID") else "src/llm.py 的默认值"
+    if os.getenv("MODEL_ID"):
+        _origin = "环境变量 MODEL_ID"
+    elif _CFG.get("model_id"):
+        _origin = "configs/model.yaml 的 model_id"
+    else:
+        _origin = "src/llm.py 的默认值"
     raise ValueError(
         f"模型名配置错误：来自 {_origin}，当前值 = {MODEL_ID!r}；"
         f"只允许 {sorted(ALLOWED_MODELS)}。"

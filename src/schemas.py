@@ -1,7 +1,6 @@
 # 返回格式模块
 # src/schemas.py
 from pydantic import BaseModel, Field
-from typing import Literal
 
 class Evidence(BaseModel):
     chunk_id: str = Field(description="必须来自本次输入，不允许模型自行编造")
@@ -21,14 +20,6 @@ class MatchItemOut(BaseModel):
     ok: bool = True
     items: list[ItemMap] = []
     reason: str = ""
-
-class UnitPeriodOut(BaseModel):
-    ok: bool
-    unit: Literal["元","千元","万元","百万元","亿元","unknown"]
-    scope: Literal["CONSOLIDATED","PARENT"]
-    period_type: Literal["FY","YTD","BAL_END","BAL_BEG","UNKNOWN"]
-    confidence: float = Field(ge=0, le=1)
-    evidence: Evidence
 
 class ClaimMatch(BaseModel):
     claim_id: str
@@ -60,9 +51,7 @@ class ReportTextOut(BaseModel):
 
 SCHEMA_BY_TASK = {
     "match_item":      MatchItemOut,
-    "unit_period":     UnitPeriodOut,
     "match_claim":     MatchClaimOut,
     "explain_anomaly": ExplainOut,
-    "gen_report_text": ReportTextOut,
     "gen_commentary":  ReportTextOut,   # 研报式评价：允许引用程序喂的确定数字，白名单校验
 }

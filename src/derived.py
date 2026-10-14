@@ -15,6 +15,9 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 YI = Decimal("100000000")        # 元 → 亿元
 MAX_DERIVED = 40                 # 派生条目上限，控制提示词篇幅
+# 时点期间判据：完整日期 YYYY-MM-DD。★ 不能只看"含连字符"——半年报的流量期间
+# 是 `2026-H1`（含连字符但属时期数），按连字符判定会被误当成时点数，同比/比率全失效。
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # 参与派生计算的科目：利润表/现金流量表类（按年）+ 资产负债表类（按时点）
 SCALE_FY = (("TOTAL_REVENUE", "营业总收入"), ("REVENUE", "营业收入"),
@@ -80,9 +83,9 @@ def _index(records: list[dict]) -> tuple[dict, dict]:
         y = _year(period)
         if d is None or y is None:
             continue
-        if "-" in period:                       # 2025-12-31 → 时点
+        if _DATE_RE.match(period):              # 2025-12-31 → 时点
             bs[(code, period)] = d
-        else:                                   # 2025 → 时期
+        else:                                   # 2025 / 2026-H1 → 时期
             fy[(code, y)] = d
     return fy, bs
 
@@ -114,6 +117,33 @@ def _ratios(fy: dict, bs: dict, year: int | None, date: str | None) -> dict:
         if ta not in (None, 0) and tl is not None:
             r["RATIO_LEV"] = tl / ta * 100
     return r
+
+
+# 供 C研 研报引用比对消费的比率：真值由程序计算，item_code 与 fields.yaml 对齐
+RATIO_CODES = ("RATIO_GROSS", "RATIO_NET", "RATIO_LEV")
+
+
+def ratio_records(records: list[dict]) -> list[dict]:
+    """把可由主表确定性计算的比率，产成**逐期记录**，供研报引用数值比对。
+
+    与 compute_derived 的区别：后者只取"最近一期"给模型写话；本函数对**每个期间**
+    各产一条，因为研报可能引用上年或更早期间。口径与 RATIO_META 完全一致，
+    数值仍由程序算，模型不参与——只是把结果整理成与结构化记录同构的形态。
+    """
+    fy, bs = _index(records)
+    meta = {k: (n, u, nd) for k, n, u, nd, _b in RATIO_META}
+    out: list[dict] = []
+    periods = [(str(y), "FY", _ratios(fy, bs, y, None)) for y in sorted({y for _c, y in fy})]
+    periods += [(d, "BAL_END", _ratios(fy, bs, None, d)) for d in sorted({d for _c, d in bs})]
+    for period, ptype, vals in periods:
+        for key in RATIO_CODES:
+            if key not in vals:
+                continue
+            name, unit, nd = meta[key]
+            out.append({"item_code": key, "period": period, "period_type": ptype,
+                        "value": _num(vals[key], nd), "unit_raw": unit,
+                        "raw_text": f"{name}{_num(vals[key], nd)}{unit}"})
+    return out
 
 
 def compute_derived(records: list[dict]) -> list[dict]:

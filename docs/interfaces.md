@@ -1,10 +1,12 @@
 # 接口契约 interfaces.md
 
-**版本：v1.4**
+**版本：v1.5**
 （v1.0 → v1.1：科目归一化的证据改为程序回填，见 §3.1 与 §5.2；
 v1.1 → v1.2：研报引用匹配的证据同样改为程序回填，见 §3.3；
 v1.2 → v1.3：docx 源的定位改用 `locator` 替代 `page`，见 §2.1a；生效日期 2026-10-05；
-v1.3 → v1.4：`statement` 枚举新增 `MDNA`（第三节 管理层讨论与分析，用于分部数据），见 §2.1[8]；生效日期 2026-10-13）
+v1.3 → v1.4：`statement` 枚举新增 `MDNA`（第三节 管理层讨论与分析，用于分部数据），见 §2.1[8]；生效日期 2026-10-13；
+v1.4 → v1.5：`gen_commentary` 输入新增 `analysis`（`src/financial_analysis.py` 确定性财务分析），
+输出由五小节收敛为**四模块**（收入分析 / 盈利能力 / 现金流 / 风险提示），见 §5.1；生效日期 2026-10-14）
 
 ## 0. 文档用途与生效方式
 
@@ -250,7 +252,7 @@ v1.3 → v1.4：`statement` 枚举新增 `MDNA`（第三节 管理层讨论与�
   "checked": 12, "passed": 11, "rejected": 1,
   "items": [
     {"task": "match_item", "chunk_id": "p042_t1", "ok": true, "quote": "营业收入"},
-    {"task": "unit_period", "chunk_id": null, "ok": false,
+    {"task": "explain_anomaly", "chunk_id": null, "ok": false,
      "reason": "chunk_id 不在本次输入中（疑似编造）"}
   ]
 }
@@ -416,28 +418,33 @@ v1.3 → v1.4：`statement` 枚举新增 `MDNA`（第三节 管理层讨论与�
 
 ## 5. 接口 [4]：模型输入输出契约（信息工程内部，供 A/B 知悉）
 
-### 5.1 六类输入（`src/inputs.py`）
+### 5.1 四类输入（`src/inputs.py`）
 
 | 序 | 任务名 | 输入内容 | 关键约束 |
 |---|---|---|---|
 | [1] | `match_item` | `headers` + `standard_items` | 单批 ≤ 40 条 |
-| [2] | `unit_period` | `chunk_id` + `header_text` + `candidates` | 候选表必须给出 |
-| [3] | `match_claim` | `claims` + `fields` | **只给科目与期间，不给金额** |
-| [4] | `explain_anomaly` | `rule_id` + `diff_desc` + `chunk_id` + `quote` + `candidates` | 候选原因必须给出 |
-| [5] | `gen_report_text` | `dimensions` + `anomaly_items` + `grade_label` | **不得产出任何数字**，数字由程序在模板填 |
-| [6] | `gen_commentary` | `metrics` + `derived` + `csi` + `anomalies` + `research` + `counts` | 只引用输入已给的数，禁止自行计算；数字白名单校验（含派生值） |
+| [2] | `match_claim` | `claims` + `fields` | **只给科目与期间，不给金额** |
+| [3] | `explain_anomaly` | `rule_id` + `diff_desc` + `chunk_id` + `quote` + `candidates` | 候选原因必须给出 |
+| [4] | `gen_commentary` | `metrics` + `derived` + `analysis` + `csi` + `anomalies` + `research` + `counts` | 只引用输入已给的数，禁止自行计算；数字白名单校验（含派生值与确定性分析） |
+
+> **任务收敛（2026-10-14）**：原 `unit_period`（单位/期间识别）与 `gen_report_text`（报告定性文字）
+> 未被 pipeline 调用，属死代码，已连同 `prompts/*.txt`、`UnitPeriodOut`、`build_unit_period`、
+> `build_gen_report_text`、`test_schema_roundtrip.py` 一并移除；单位/期间/口径的识别实际由
+> `tools/extract_fields.py` 在抽取阶段确定性完成，报告定性文字由 `gen_commentary` 承担。
 
 **`derived` 派生计算（2026-10-14 新增，`src/derived.py::compute_derived`）**：缺失的对比口径由**程序确定性计算**补齐，不在模型侧产出，随 payload 一并喂给模型。五类前缀：
 `SCALE_` 亿元换算（unit: 亿元，1 位小数）/ `YOY_` 同比增速（%，2 位小数）/ `RATIO_` 比率（毛利率·净利率·归母净利率·营业利润率·资产负债率 %，经营现金流净利润比 倍）/ `PCTCHG_` 比率同比变动（pcts，1 位小数）/ `PROJ_` 按最近一期同比增速线性外推的**情景测算**值（亿元，后缀 `2026E`，非盈利预测）。每条含 `code/name/period/value/unit/basis`，其中 `basis` 为口径说明且**不含任何数字**（防止公式常数污染数字白名单）。派生值经 `inputs.py::collect_allowed_numbers` 进入白名单；`gen_commentary` 正文中的每个数字都必须逐字取自白名单，`tasks.py::_post_checks` 对该任务执行 `validators.check_no_amounts`。
-输出结构固定为对齐券商点评研报的**五小节**（核心观点 / 经营情况 / 盈利质量 / 一致性核查 / 风险提示），小节名不得增删改。
 
-### 5.2 六类输出（`src/schemas.py`）
+**`analysis` 确定性财务分析（2026-10-14 新增，`src/financial_analysis.py::analyze`）**：与 `derived` 同源（均为程序算、可复现、不调模型），按四组输出 `{code,name,period,value,unit,basis}`——盈利能力（毛利率/净利率/ROE/ROIC）、费用率（税金及附加率/销售费用率/管理费用率）、趋势（同比增速/pcts 变化）、结构（分产品占比/分渠道占比/吨价）；输入缺失时该条目缺席并记 `warnings`，不抛异常。与 `derived` 中同 `code` 的条目**去重（`derived` 优先）**后并入 payload，`counts` 增 `analysis` 计数。
+输出结构固定为对齐券商点评研报的**四模块**（收入分析 / 盈利能力 / 现金流 / 风险提示），模块名不得增删改。
 
-`match_item` → `MatchItemOut`；`unit_period` → `UnitPeriodOut`；`match_claim` → `MatchClaimOut`；`explain_anomaly` → `ExplainOut`；`gen_report_text` → `ReportTextOut`；`gen_commentary` → `ReportTextOut`。
+### 5.2 四类输出（`src/schemas.py`）
+
+`match_item` → `MatchItemOut`；`match_claim` → `MatchClaimOut`；`explain_anomaly` → `ExplainOut`；`gen_commentary` → `ReportTextOut`。
 
 所有输出必须包含 `evidence`（含 `chunk_id` 与 `quote`）。
 **例外（v1.1）**：`match_item` 的输出不含 `evidence`，其证据由程序回填，理由见 §3.1（3.1a）。
-`gen_report_text` / `gen_commentary` 为纯文本任务，亦不返回 `evidence`。
+`gen_commentary` 为纯文本任务，亦不返回 `evidence`。
 其余类任务仍必须由模型返回 `evidence` 并通过程序校验。
 
 ### 5.3 模型三条禁则

@@ -14,6 +14,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+# CSI 口径提示：与报告三格式共用同一份文案，避免"满分 = 全部维度通过"的误导
+from src.report import _csi_caveat
+
 ROOT = Path(__file__).resolve().parent
 STATUS_ZH = {"PASS": "通过", "FAIL": "异常", "REVIEW": "需人工复核", "NA": "不适用"}
 DIM_ZH = {"C内": "表内勾稽", "C间": "表间一致", "C期": "跨期衔接",
@@ -139,12 +142,16 @@ for p in sorted((base / "ingested").glob("*.json")) if (base / "ingested").exist
 calls = manifest.get("calls", {})
 anomalies = [r for r in results if r.get("status") in ("FAIL", "REVIEW")]
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("CSI", csi.get("csi") if csi.get("csi") is not None else "—",
+_csi_caveat_text = _csi_caveat(csi)
+c1.metric("CSI（临时）" if _csi_caveat_text else "CSI",
+          csi.get("csi") if csi.get("csi") is not None else "—",
           csi.get("grade_label", ""), delta_color="off")
 c2.metric("提取字段", len(fields))
 c3.metric("规则结果", len(results))
 c4.metric("异常 / 待复核", len(anomalies))
 c5.metric("模型调用", f"{calls.get('api_ok', 0)} 在线 / {calls.get('cache_hit', 0)} 缓存")
+if _csi_caveat_text:
+    st.warning(f"CSI 口径提示：{_csi_caveat_text}")
 st.caption("指标卡读的是**左侧选中的历史运行**的统计，与上传表单里是否勾选离线无关。"
            "「模型调用」= 在线（api_ok，真实请求成功）/ 缓存（cache_hit，命中本地缓存）。"
            "离线运行、或该次全部命中缓存时，都会显示为 0 在线。")
@@ -218,6 +225,8 @@ with tab2:
             f"- 原权重：`{json.dumps(csi.get('weights_used', {}), ensure_ascii=False)}`\n"
             f"- 归一化权重：`{json.dumps(csi.get('weights_normalized', {}), ensure_ascii=False)}`\n"
             f"- 不适用维度：`{','.join(csi.get('na_dimensions') or []) or '无'}`（权重已分摊）")
+        if _csi_caveat_text:
+            st.warning(f"CSI 口径提示：{_csi_caveat_text}")
 
         scored = {k: v["score"] for k, v in dims.items() if v["score"] is not None}
         if scored:

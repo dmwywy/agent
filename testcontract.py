@@ -27,10 +27,10 @@ def t2():
 
 # 输入格式
 def t3():
-    from src.inputs import build_match_item, build_unit_period, build_match_claim, build_explain_anomaly
+    from src.inputs import build_match_item, build_match_claim, build_explain_anomaly
     p = build_match_item(["营业总收入"], [{"code": "TOTAL_REVENUE", "name": "营业总收入"}])
     assert json.dumps(p, ensure_ascii=False)
-    return "4 个构造函数可用"
+    return "3 个构造函数可用"
 
 # 返回格式
 def t4():

@@ -20,7 +20,7 @@
 | 名称 | 版本 | 来源 | 许可证 | 具体使用范围 |
 |---|---|---|---|---|
 | openai | 3.19.2 | PyPI | Apache-2.0 | 唯一的模型客户端。`src/llm.py` 以 `base_url=https://api.deepseek.com` 调用 `/chat/completions`（`openai` SDK 自动补路径）。全项目唯一出站入口，其余模块不得直接调用 |
-| pydantic | 2.13.5 | PyPI | MIT | `src/schemas.py` 定义并校验 5 类模型返回结构（`MatchItemOut` / `UnitPeriodOut` / `MatchClaimOut` / `ExplainOut` / `ReportTextOut`）；`src/tasks.py` 的三层校验第一层 |
+| pydantic | 2.13.5 | PyPI | MIT | `src/schemas.py` 定义并校验 4 类模型返回结构（`MatchItemOut` / `MatchClaimOut` / `ExplainOut` / `ReportTextOut`）；`src/tasks.py` 的三层校验第一层 |
 | python-dotenv | 1.2.3 | PyPI | BSD-3-Clause | `src/llm.py` 读取 `.env` 中的 `DEEPSEEK_API_KEY`、`MODEL_ID`；凭据仅调用时读取，不落日志/报告/缓存 |
 | PyYAML | 6.0.3 | PyPI | MIT | 读取配置与规则：`rules/fields.yaml`、`rules/rules.yaml`、`rules/tolerance.yaml`、`configs/demo.yaml`、`configs/model.yaml`；亦用于 `src/tasks.py` 加载标准科目清单 |
 | pdfplumber | 0.11.10 | PyPI | MIT | 年报 PDF 的文本/表格解析：`src/ingest.py::_pdf_text`、`tools/extract_fields.py` 的 PDF 路径、`tools/build_gold_standard.py` |
@@ -43,7 +43,7 @@
 
 | 名称 | 版本/标识 | 来源 | 许可证 | 具体使用范围 |
 |---|---|---|---|---|
-| DeepSeek API | 请求模型标识 **`deepseek-flash`**；对外产品名 **DeepSeek-V4.1-Flash**（另有白名单可选 `deepseek-v4-pro`） | 深度求索开放平台（`api.deepseek.com`） | 商业服务（非开源，不提交源代码） | 受限期语义任务：`match_item` 科目归一化、`unit_period` 单位/期间/口径识别、`match_claim` 研报引用匹配、`explain_anomaly` 异常原因解释（候选中选一）、`gen_report_text` 报告定性文字。请求参数固定 `temperature=0 / top_p=1 / max_tokens=8000 / stream=false / response_format={"type":"json_object"} / thinking={"type":"disabled"}`，见 `docs/model_adapter_contract.md` §4、§9 |
+| DeepSeek API | 请求模型标识 **`deepseek-flash`**；对外产品名 **DeepSeek-V4.1-Flash**（另有白名单可选 `deepseek-v4-pro`） | 深度求索开放平台（`api.deepseek.com`） | 商业服务（非开源，不提交源代码） | 受限期语义任务（**4 个**）：`match_item` 科目归一化、`match_claim` 研报引用匹配、`explain_anomaly` 异常原因解释（候选中选一）、`gen_commentary` 报告定性文字（研报式评价）。请求参数固定 `temperature=0 / top_p=1 / max_tokens=8000 / stream=false / response_format={"type":"json_object"} / thinking={"type":"disabled"}`，见 `docs/model_adapter_contract.md` §4、§9 |
 
 使用边界（与 `docs/model_adapter_contract.md` 一致）：
 

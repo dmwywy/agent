@@ -5,7 +5,6 @@
 import re
 from decimal import Decimal, InvalidOperation
 
-MAX_CHARS = 4000          # 单段文本上限
 MAX_ITEMS = 40            # 一次最多让模型处理的科目/条款条数
 
 # ---------- 科目归一化：给科目名，问它对应哪个标准科目 ----------
@@ -16,17 +15,6 @@ def build_match_item(headers: list[str], standard_items: list[dict]) -> dict:
         "task": "match_item",
         "headers": headers[:MAX_ITEMS],
         "standard_items": standard_items,   # [{"code":"REVENUE","name":"营业收入"}, ...]
-    }
-
-# ---------- 单位/期间/口径识别：只给表头文字，让它选，不给它自由发挥 ----------
-def build_unit_period(chunk_id: str, header_text: str,
-                      candidates: dict[str, list[str]]) -> dict:
-    """header_text 是表头那一行原文；candidates 是候选答案表"""
-    return {
-        "task": "unit_period",
-        "chunk_id": chunk_id,                # ★ 它只能引用这个 id，不能自己说页码
-        "header_text": header_text[:MAX_CHARS],
-        "candidates": candidates,            # {"unit":[...], "scope":[...], "period_type":[...]}
     }
 
 # ---------- 研报引用匹配：判断"这句话在说哪个指标"，不判断对错 ----------
@@ -49,40 +37,6 @@ def build_explain_anomaly(rule_id: str, diff_desc: str, chunk_id: str,
         "candidates": candidates,      # ["UNIT_SCALE","PERIOD_MISMATCH","SCOPE_MIXED","..."]
     }
 
-# ---------- 核查报告结论文字：只给"结构"，数字由程序在模板里填 ----------
-MAX_ANOMALY_ITEMS = 30
-
-def build_gen_report_text(dimensions: dict, anomalies: list[dict],
-                          grade_label: str) -> dict:
-    """报告结论文字。模型只写定性表述，**不产出任何数字**。
-
-    dimensions: {"C内": {"status":"HAS_ISSUES"}, ...}
-                只传定性标记，不把结果计数交给模型。
-    anomalies:  [{"rule_id":"BS01","dimension":"C内","item_code":"TOTAL_ASSETS",
-                  "status":"FAIL"}, ...]
-    grade_label: 分级中文名，如"基本一致"（由程序按 CSI 判定）
-    """
-    safe = [{
-        "rule_id": a.get("rule_id", ""),
-        "dimension": a.get("dimension", ""),
-        "item_code": a.get("item_code", ""),   # 只给科目编号，**不给金额与差额**
-        "status": a.get("status", ""),
-    } for a in anomalies[:MAX_ANOMALY_ITEMS]]
-
-    safe_dimensions = {}
-    for name, counts in dimensions.items():
-        has_issue = bool(counts.get("fail", 0) or counts.get("review", 0))
-        safe_dimensions[name] = {"status": "HAS_ISSUES" if has_issue else "CLEAR"}
-
-    return {
-        "task": "gen_report_text",
-        "dimensions": safe_dimensions,
-        "anomaly_items": safe,
-        "grade_label": grade_label,
-        "has_omitted_anomalies": len(anomalies) > MAX_ANOMALY_ITEMS,
-    }
-
-
 # ---------- 研报式评价：程序把确定数字喂给模型，模型写分析话，数字白名单校验 ----------
 MAX_COMMENT_METRICS = 24     # 最多喂多少条核心经营指标，控制篇幅与成本
 MAX_COMMENT_ANOMALIES = 20
@@ -91,7 +45,8 @@ MAX_COMMENT_RESEARCH = 20
 # 供评价聚焦的核心科目（与研报点评最相关的收入/利润/现金流/资产负债主项）
 COMMENT_CORE = ("TOTAL_REVENUE", "REVENUE", "NP_PARENT", "NET_PROFIT",
                 "OPERATING_COST", "CF_OPERATING", "TOTAL_ASSETS", "TOTAL_LIAB",
-                "TOTAL_EQUITY", "REVENUE_MOUTAI", "REVENUE_SERIES")
+                "TOTAL_EQUITY", "REVENUE_MOUTAI", "REVENUE_SERIES",
+                "REVENUE_IMOUTAI")
 
 
 def _normalize_number(s: str) -> set[str]:
@@ -139,11 +94,13 @@ def collect_allowed_numbers(obj) -> set[str]:
 
 
 MAX_COMMENT_DERIVED = 40
+MAX_COMMENT_ANALYSIS = 40
 
 
 def build_gen_commentary(metrics: list[dict], csi: dict, anomalies: list[dict],
                          research_fail: list[dict], grade_label: str,
-                         derived: list[dict] | None = None) -> dict:
+                         derived: list[dict] | None = None,
+                         analysis: dict | None = None) -> dict:
     """研报式评价输入：把所有"程序已算好的确定数字"喂给模型，让它写一段分析评价。
 
     metrics: [{"code","name","period","value"}] —— 程序提取的经营指标值（带确定数值）
@@ -151,11 +108,13 @@ def build_gen_commentary(metrics: list[dict], csi: dict, anomalies: list[dict],
     anomalies:   异常清单（含确定 diff / tolerance）
     research_fail: 研报引用比对不一数（含研报值/财报值/差异）
     derived: src.derived.compute_derived 的产物 —— 同比/比率/亿元换算/情景测算外推
+    analysis: src.financial_analysis.analyze 的产物 —— 盈利能力/费用率/趋势/结构四组
+              （与 derived 同 code 的条目在此按 code 去重，derived 优先，避免重复喂入）
 
-    ★ 与 gen_report_text 相反：这里**给数字**，因为用户要的是"根据数据做评价"。
-    但数字一律来自程序产物（提取值 + 派生计算值），模型只负责组织语言、不做任何运算；
-    输出再经 collect_allowed_numbers 白名单兜底，任何程序没给的数字都会被拦截
-    （src/tasks._post_checks）。
+    ★ 与其他任务相反：这里**给数字**，因为用户要的是"根据数据做评价"。
+    但数字一律来自程序产物（提取值 + 派生计算值 + 财务分析值），模型只负责组织语言、
+    不做任何运算；输出再经 collect_allowed_numbers 白名单兜底，任何程序没给的数字
+    都会被拦截（src/tasks._post_checks）。
     """
     core = [{
         "code": m.get("code", ""),
@@ -190,10 +149,24 @@ def build_gen_commentary(metrics: list[dict], csi: dict, anomalies: list[dict],
         "basis": d.get("basis", ""),
     } for d in (derived or [])[:MAX_COMMENT_DERIVED]]
 
+    # 财务分析结果并入：按 code 对 derived 去重（derived 优先），避免同一指标喂两遍
+    derived_codes = {d["code"] for d in safe_derived}
+    src_analysis = analysis.get("metrics") if isinstance(analysis, dict) else analysis
+    safe_analysis = [{
+        "group": m.get("group", ""),
+        "code": m.get("code", ""),
+        "name": m.get("name", ""),
+        "period": str(m.get("period", "")),
+        "value": str(m.get("value", "")),
+        "unit": m.get("unit", ""),
+        "basis": m.get("basis", ""),
+    } for m in (src_analysis or []) if m.get("code") not in derived_codes][:MAX_COMMENT_ANALYSIS]
+
     return {
         "task": "gen_commentary",
         "metrics": core,
         "derived": safe_derived,
+        "analysis": safe_analysis,
         "csi": {"csi": csi.get("csi"),
                 "grade": csi.get("grade", ""),
                 "grade_label": grade_label},
@@ -204,6 +177,7 @@ def build_gen_commentary(metrics: list[dict], csi: dict, anomalies: list[dict],
         "counts": {
             "metrics": len(core),
             "derived": len(safe_derived),
+            "analysis": len(safe_analysis),
             "anomalies": len(safe_anom),
             "research": len(safe_research),
         },

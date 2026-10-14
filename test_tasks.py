@@ -1,9 +1,10 @@
 # test_tasks.py   运行：python -m pytest -q
 import json
+from pathlib import Path
 
 from src.errors import classify
 from src.schemas import SCHEMA_BY_TASK
-from src.inputs import (build_match_item, build_unit_period,
+from src.inputs import (build_match_item,
                         build_match_claim, build_explain_anomaly)
 
 
@@ -18,7 +19,7 @@ def test_temperature_fixed():
 
 
 def test_schema_count_and_export():
-    assert len(SCHEMA_BY_TASK) == 6
+    assert len(SCHEMA_BY_TASK) == 4
     for cls in SCHEMA_BY_TASK.values():
         cls.model_json_schema()
 
@@ -26,7 +27,7 @@ def test_schema_count_and_export():
 def test_inputs_constructors():
     p = build_match_item(["营业收入"], [{"code": "REVENUE", "name": "营业收入"}])
     assert p["task"] == "match_item"
-    for f in (build_unit_period, build_match_claim, build_explain_anomaly):
+    for f in (build_match_claim, build_explain_anomaly):
         assert callable(f)
 
 
@@ -37,12 +38,22 @@ def test_error_classify():
 
 
 def test_prompt_files_naming():
-    """五个提示词必须都能按约定文件名加载"""
+    """四个提示词必须都能按约定文件名加载"""
     from src.tasks import load_prompt
     for task in SCHEMA_BY_TASK:
         text, meta = load_prompt(task)
         assert "json" in text.lower(), f"{task} 提示词缺少 json 字样"
         assert len(meta["sha256"]) == 64
+
+
+def test_skills_cover_registered_tasks():
+    """skills/ 下每个 SKILL.md 必须覆盖全部注册任务，且含比赛要求的 4 个能力 Skill。"""
+    skills_dir = Path(__file__).resolve().parent / "skills"
+    names = {p.parent.name for p in skills_dir.glob("*/SKILL.md")}
+    # ① 模型侧 4 个受注册任务，② 比赛要求的能力 Skill（计算/核查/提取/报告）
+    required = set(SCHEMA_BY_TASK) | {"financial-ratio-calculator", "consistency-checker",
+                                      "field-extractor", "report-generator"}
+    assert required <= names, f"skills 缺少以下定义：{required - names}"
 
 
 def test_netguard_installed():
@@ -81,7 +92,7 @@ def test_post_checks_evidence():
     """模型引用一个它没见过的 chunk_id，应判证据无效。"""
     from src.tasks import _post_checks
     bad = {"evidence": {"chunk_id": "p999_t1", "quote": "营业收入"}}
-    errs = _post_checks(bad, "unit_period", {"chunks": {"p042_t1": "营业收入"}})
+    errs = _post_checks(bad, "explain_anomaly", {"chunks": {"p042_t1": "营业收入"}})
     assert any("chunk_id" in e for e in errs)
 
 
@@ -136,22 +147,6 @@ def test_multi_indicator_matches_are_kept():
     assert all(g["evidence"]["verified"] for g in got)
 
 
-# ---------- A：第五个任务的输入构造器 ----------
-
-def test_gen_report_text_excludes_amounts():
-    """报告结论输入只含结构与科目编号，不得把金额/差额喂给模型。"""
-    from src.inputs import build_gen_report_text
-    p = build_gen_report_text(
-        {"C内": {"pass": 10, "fail": 1, "review": 0, "na": 0}},
-        [{"rule_id": "BS01", "dimension": "C内", "item_code": "TOTAL_ASSETS",
-          "status": "FAIL", "left": "5000000000.00", "diff": "2000000.00",
-          "tolerance": "500.00"}],
-        "基本一致")
-    assert p["task"] == "gen_report_text"
-    assert set(p["anomaly_items"][0]) == {"rule_id", "dimension", "item_code", "status"}
-    assert "5000000000" not in json.dumps(p, ensure_ascii=False)
-
-
 def test_gen_commentary_filters_to_core_metrics():
     """研报式评价只喂核心科目，非核心科目（如附注明细）不进入输入。"""
     from src.inputs import build_gen_commentary
@@ -183,8 +178,8 @@ def test_commentary_whitelist_rejects_fabricated_number():
     assert check_no_amounts("营业总收入 174140000000.00 元。", allowed) == []
 
 
-def test_all_five_tasks_have_input_builders():
-    """每个任务必须各有输入构造器。"""
+def test_all_registered_tasks_have_input_builders():
+    """每个受注册任务必须各有输入构造器。"""
     from src import inputs
     from src.schemas import SCHEMA_BY_TASK
     for task in SCHEMA_BY_TASK:
@@ -285,6 +280,154 @@ def test_commentary_payload_carries_derived_into_whitelist():
     # 程序没给过的数字 → 仍必须被拦
     assert any("未经程序确认" in e
                for e in check_no_amounts("毛利率高达 88.8%。", allowed))
+
+
+# ---------- B2：确定性财务分析模块（src/financial_analysis.py） ----------
+
+_FA_RECS = [
+    {"item_code": "REVENUE", "period": "2024", "value": "1000"},
+    {"item_code": "REVENUE", "period": "2023", "value": "800"},
+    {"item_code": "OPERATING_COST", "period": "2024", "value": "400"},
+    {"item_code": "OPERATING_COST", "period": "2023", "value": "300"},
+    {"item_code": "TOTAL_REVENUE", "period": "2024", "value": "1000"},
+    {"item_code": "TOTAL_REVENUE", "period": "2023", "value": "800"},
+    {"item_code": "NET_PROFIT", "period": "2024", "value": "200"},
+    {"item_code": "NP_PARENT", "period": "2024", "value": "180"},
+    {"item_code": "TOTAL_PROFIT", "period": "2024", "value": "250"},
+    {"item_code": "FIN_EXPENSE", "period": "2024", "value": "10"},
+    {"item_code": "INCOME_TAX", "period": "2024", "value": "50"},
+    {"item_code": "TAX_SURCHARGE", "period": "2024", "value": "20"},
+    {"item_code": "SELLING_EXPENSE", "period": "2024", "value": "30"},
+    {"item_code": "ADMIN_EXPENSE", "period": "2024", "value": "40"},
+    {"item_code": "SHORT_TERM_LOAN", "period": "2024-12-31", "value": "100"},
+    {"item_code": "LONG_TERM_LOAN", "period": "2024-12-31", "value": "200"},
+    {"item_code": "TOTAL_EQUITY", "period": "2024-12-31", "value": "500"},
+    {"item_code": "EQUITY_PARENT", "period": "2024-12-31", "value": "500"},
+    {"item_code": "REVENUE_LIQUOR", "period": "2024", "value": "900"},
+    {"item_code": "REVENUE_MOUTAI", "period": "2024", "value": "700"},
+    {"item_code": "REVENUE_SERIES", "period": "2024", "value": "200"},
+    {"item_code": "REVENUE_DIRECT", "period": "2024", "value": "600"},
+    {"item_code": "REVENUE_WHOLESALE", "period": "2024", "value": "300"},
+    {"item_code": "REVENUE_IMOUTAI", "period": "2024", "value": "400"},
+    {"item_code": "VOLUME_MOUTAI", "period": "2024", "value": "10"},
+    {"item_code": "VOLUME_SERIES", "period": "2024", "value": "20"},
+]
+
+
+def test_financial_analysis_profitability_and_expense():
+    """盈利能力（毛利率/净利率/ROE/ROIC）与费用率必须是程序算出的确切值。"""
+    from src.financial_analysis import analyze
+    got = {m["code"]: m for m in analyze(_FA_RECS)["metrics"]}
+    assert got["RATIO_GROSS"]["value"] == "60.0"      # (1000-400)/1000
+    assert got["RATIO_NET"]["value"] == "20.0"        # 200/1000
+    assert got["ROE"]["value"] == "36.0"              # 180/500
+    # ROIC: (250+10)*(1-50/250) / (100+200+500) = 208/800 = 26.0
+    assert got["ROIC"]["value"] == "26.0"
+    assert got["EXP_TAX_RATE"]["value"] == "2.0"      # 20/1000
+    assert got["EXP_SELLING_RATE"]["value"] == "3.0"  # 30/1000
+    assert got["EXP_ADMIN_RATE"]["value"] == "4.0"    # 40/1000
+
+
+def test_financial_analysis_trend_and_structure():
+    """趋势（同比/pcts）与结构（分产品/分渠道占比、吨价）的确定性数值。"""
+    from src.financial_analysis import analyze
+    got = {m["code"]: m for m in analyze(_FA_RECS)["metrics"]}
+    assert got["YOY_TOTAL_REVENUE"]["value"] == "25.00"       # (1000-800)/800
+    assert got["PCTCHG_RATIO_GROSS"]["unit"] == "pcts"
+    assert got["PCTCHG_RATIO_GROSS"]["value"] == "-2.5"       # 60.0 - 62.5
+    assert got["MIX_PRODUCT_MOUTAI"]["value"] == "77.8"       # 700/900
+    assert got["MIX_CHANNEL_IMOUTAI"]["value"] == "44.4"      # 400/900
+    assert got["TON_PRICE_MOUTAI"]["value"] == "70.00"        # 700/10
+    assert got["TON_PRICE_MOUTAI"]["unit"] == "元/吨"
+
+
+def test_financial_analysis_missing_inputs_warn_not_crash():
+    """输入缺失时给出明确提示而非崩溃；非法输入也不得抛异常。"""
+    from src.financial_analysis import analyze
+    # 空输入
+    empty = analyze([])
+    assert empty["metrics"] == [] and empty["warnings"]
+    # 非法类型
+    assert analyze(None)["metrics"] == []
+    assert analyze("not-a-list")["metrics"] == []
+    # 只有营业收入、没有成本 → 不产出毛利率，并给出提示
+    one = analyze([{"item_code": "REVENUE", "period": "2024", "value": "1000"}])
+    codes = {m["code"] for m in one["metrics"]}
+    assert "RATIO_GROSS" not in codes
+    assert any("毛利率" in w for w in one["warnings"])
+
+
+def test_financial_analysis_names_basis_have_no_digits():
+    """名称/单位/口径不得含阿拉伯数字——否则会污染数字白名单。"""
+    import re
+    from src.financial_analysis import analyze
+    for m in analyze(_FA_RECS)["metrics"]:
+        for field in ("name", "unit", "basis"):
+            assert not re.search(r"\d", m[field]), f"{m['code']} 的 {field} 混入了数字"
+
+
+def test_forecast_products_and_pe_scenarios():
+    """盈利预测基础：分产品收入预测与 PE 情景测算必须是确定性值，且名称/口径不含数字。"""
+    import re
+    from src.forecast import forecast
+    recs = [
+        {"item_code": "REVENUE", "period": "2024", "value": "100000000000"},
+        {"item_code": "REVENUE", "period": "2023", "value": "80000000000"},
+        {"item_code": "REVENUE_MOUTAI", "period": "2024", "value": "70000000000"},
+        {"item_code": "REVENUE_MOUTAI", "period": "2023", "value": "50000000000"},
+        {"item_code": "REVENUE_SERIES", "period": "2024", "value": "20000000000"},
+        {"item_code": "REVENUE_SERIES", "period": "2023", "value": "20000000000"},
+        {"item_code": "NP_PARENT", "period": "2024", "value": "18000000000"},
+    ]
+    metrics = forecast(recs)["metrics"]
+    got = {m["code"]: m for m in metrics}
+    assert got["PROD_FORE_REVENUE_MOUTAI"]["value"] == "980.0"   # 700×(1+40%)
+    assert got["PROD_FORE_REVENUE_SERIES"]["value"] == "200.0"   # 200×(1+0%)
+    assert got["PE_MCAP_15"]["value"] == "2700.0"                # 180×15
+    assert got["PE_MCAP_30"]["value"] == "5400.0"                # 180×30
+    for m in metrics:
+        for field in ("name", "unit", "basis"):
+            assert not re.search(r"\d", m[field]), f"{m['code']} 的 {field} 混入了数字"
+    # 输入不足（空/非法）不得抛异常
+    assert forecast([])["metrics"] == [] and forecast(None)["metrics"] == []
+
+
+def test_report_includes_financial_ratio_analysis_section():
+    """报告新增独立「财务比率分析」章节，并按报表分类展示字段（PDF / HTML 均含）。"""
+    from src.pipeline import ROOT
+    from src.report import build_all
+
+    base = ROOT / "runs" / "pytest_report_analysis" / "ingested"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "sample.json").write_text(json.dumps([
+        {"item_code": "REVENUE", "item_raw": "营业收入", "period": "2024", "statement": "IS",
+         "period_type": "FY", "value": "100000000000"},
+        {"item_code": "REVENUE", "item_raw": "营业收入", "period": "2023", "statement": "IS",
+         "period_type": "FY", "value": "80000000000"},
+        {"item_code": "OPERATING_COST", "item_raw": "营业成本", "period": "2024",
+         "statement": "IS", "period_type": "FY", "value": "40000000000"},
+        {"item_code": "TOTAL_ASSETS", "item_raw": "资产总计", "period": "2024-12-31",
+         "statement": "BS", "period_type": "BAL_END", "value": "1000000000000"},
+    ], ensure_ascii=False), encoding="utf-8")
+
+    made = build_all("pytest_report_analysis", ("html", "pdf", "xlsx"))
+    html = (ROOT / made["html"]).read_text(encoding="utf-8")
+    assert "财务比率分析" in html and "毛利率" in html
+    assert "数据提取结果（按报表分类）" in html
+
+    with __import__("pdfplumber").open(ROOT / made["pdf"]) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    assert "财务比率分析" in text and "毛利率" in text and "资产负债表" in text
+
+
+def test_derived_half_year_period_is_timeseries_not_point():
+    """半年报的 `2026-H1` 是时期数（含连字符≠时点）；按连字符判定会让同比/比率全失效。"""
+    from src.derived import compute_derived
+    got = {it["code"]: it for it in compute_derived([
+        {"item_code": "TOTAL_REVENUE", "period": "2026-H1", "value": "1000000000"},
+        {"item_code": "TOTAL_REVENUE", "period": "2025-H1", "value": "800000000"},
+    ])}
+    assert got["YOY_TOTAL_REVENUE"]["value"] == "25.00"
 
 
 def test_commentary_sections_split():
@@ -789,6 +932,54 @@ def test_segment_table_attribution_by_section():
     assert _scan_segment_table(bad) == []
 
 
+def test_segment_heading_matches_split_half_year_titles():
+    """半年报 PDF 常把四个小节标题分行写；标题正则须命中任一分部小节，否则整段漏抽。"""
+    from tools.extract_fields import SEGMENT_HEADING_RE
+    # 分行写法：单独的"主营业务分行业情况"也要能唤醒分部提取
+    assert SEGMENT_HEADING_RE.search("主营业务分行业情况")
+    assert SEGMENT_HEADING_RE.search("主营业务分产品情况")
+    assert SEGMENT_HEADING_RE.search("主营业务分销售模式情况")
+    # 年报的合并写法仍要命中（不因放宽而漏）
+    assert SEGMENT_HEADING_RE.search("主营业务分行业、分产品、分地区、分销售模式情况")
+    # 无关文本不得误命中
+    assert not SEGMENT_HEADING_RE.search("主营业务收入情况")
+
+
+def test_segment_sales_mode_imoutai_and_direct():
+    """分销售模式小节：i茅台与直销各自归到自己的 item_code，不并成一条。"""
+    from tools.extract_fields import _scan_segment_table
+    rows = [
+        ["主营业务分销售模式情况"],
+        ["销售模式", "营业收入", "营业成本"],
+        ["直销", "1000.00", "300.00"],
+        ["i茅台", "600.00", "180.00"],
+        ["批发代理", "1700.00", "500.00"],
+    ]
+    got = {(r[0], r[1]) for r in _scan_segment_table(rows)}
+    assert ("REVENUE_DIRECT", "1000.00") in got
+    assert ("REVENUE_IMOUTAI", "600.00") in got
+    assert ("REVENUE_WHOLESALE", "1700.00") in got
+
+
+def test_volume_table_picks_sales_column_not_yoy():
+    """产销量表取"销售量"列数值；"销售量比上年增减"是同比列，不得被当成销量。"""
+    from tools.extract_fields import _scan_volume_table
+    rows = [
+        ["主要产品", "单位", "生产量", "销售量", "库存量",
+         "生产量比上年增减", "销售量比上年增减"],
+        ["茅台酒", "吨", "57,000.00", "46,310.45", "10,000.00", "5.00", "3.00"],
+        ["其他系列酒", "吨", "58,000.00", "43,000.12", "8,000.00", "6.00", "4.00"],
+    ]
+    got = {(r[0], r[1]) for r in _scan_volume_table(rows)}
+    # 销量是第 3 列（46,310.45），不是同比列（3.00）
+    assert ("VOLUME_MOUTAI", "46,310.45") in got
+    assert ("VOLUME_SERIES", "43,000.12") in got
+    assert all(v != "3.00" for _c, v, _t, _n, _l in _scan_volume_table(rows))
+    # 表头没有"销售量"列 → 整表不取，不能把生产量/库存量当销量
+    assert _scan_volume_table([["主要产品", "单位", "生产量", "库存量"],
+                              ["茅台酒", "吨", "57,000.00", "10,000.00"]]) == []
+
+
 def test_equity_table_parsing_carries_year_to_continuation():
     """权益变动表在 Word 里常被拆成"表主体 + 续表"，续表没有年份，必须沿用上一张的。"""
     from tools.extract_fields import _scan_equity_table
@@ -881,6 +1072,72 @@ def test_ar_note_row_target_sums_to_net_receivable():
     assert Decimal(row[cur["AR_GROSS"]].replace(",", "")) \
         - Decimal(row[cur["AR_BADDEBT"]].replace(",", "")) == Decimal("18974192.75")
     assert _squash("（一）综合收益总额") == "(一)综合收益总额"
+
+
+def test_pdf_extracts_ar_note_target_and_skips_decoy(tmp_path):
+    """P2-1：PDF 数据源也要能抽到应收账款"按坏账计提方法分类披露"的合计行。
+
+    造一页最小 PDF，同页放两张结构完全相同的表（先"按账龄披露"诱饵、后目标表），
+    诱饵金额刻意不同。断言：只认目标表（判据是表内出现"单项计提/组合计提"行），
+    诱饵的 111.11/222.22 一个都不许漏进来——真值与诱饵值不同，可精确区分。
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from tools.extract_fields import _extract_pdf
+
+    # ★ reportlab 默认 Helvetica 无法编码中文，直接建表会渲染成空白方框，
+    #   pdfplumber 便读不出「应收账款」，附注识别必然失败。必须注册 CJK CID 字体，
+    #   并在 Paragraph 与 Table 上都显式指定，才能造出可解析的中文测试 PDF。
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+
+    # 列头首格必须是表头名（如"项目"）而非"合计"：抽取逻辑按"第一格==合计"
+    #   定位合计行，若列头首格也写成"合计"，会被当成合计行先命中而整表取不到数。
+    header = ["项目", "账面余额", "比例", "坏账准备", "计提比例", "账面价值",
+              "期初账面余额", "期初比例", "期初坏账准备", "期初计提比例", "期初账面价值"]
+    decoy = [["账龄"] + header[1:],
+             ["合计", "111.11", "100.00", "222.22", "5.11", "-111.11",
+              "333.33", "100.00", "444.44", "2.91", "-111.11"]]
+    target = [header,
+              ["单项计提", "0.00", "0.00", "0.00", "0.00", "0.00",
+               "0.00", "0.00", "0.00", "0.00", "0.00"],
+              ["按组合计提", "19,995,290.75", "100.00", "1,021,098.00", "5.11", "18,974,192.75",
+               "62,181,941.03", "100.00", "1,808,530.62", "2.91", "60,373,410.41"],
+              ["合计", "19,995,290.75", "100.00", "1,021,098.00", "5.11", "18,974,192.75",
+               "62,181,941.03", "100.00", "1,808,530.62", "2.91", "60,373,410.41"]]
+
+    def mk(data):
+        t = Table(data, colWidths=[22 * mm] * 11)
+        t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, colors.black),
+                               ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),
+                               ("FONTSIZE", (0, 0), (-1, -1), 7)]))
+        return t
+
+    styles = getSampleStyleSheet()
+    cjk = ParagraphStyle("cjk", parent=styles["Normal"], fontName="STSong-Light")
+    doc = SimpleDocTemplate(str(tmp_path / "ar_note.pdf"), pagesize=A4)
+    doc.build([
+        Paragraph("5、应收账款", cjk),
+        Paragraph("（1）按账龄披露", cjk), mk(decoy), Spacer(1, 24),
+        Paragraph("（2）按坏账计提方法分类披露", cjk), mk(target),
+    ])
+
+    recs, _ = _extract_pdf(tmp_path / "ar_note.pdf", 2024)
+    got = {(r["item_code"], r["period"]): r["value"] for r in recs
+           if r["item_code"] in ("AR_GROSS", "AR_BADDEBT")}
+    assert got == {
+        ("AR_GROSS", "2024-12-31"): "19995290.75",
+        ("AR_BADDEBT", "2024-12-31"): "1021098.00",
+        ("AR_GROSS", "2023-12-31"): "62181941.03",
+        ("AR_BADDEBT", "2023-12-31"): "1808530.62",
+    }, f"应收账款坏账计提附注未按预期抽取（诱饵值不得漏入）：{got}"
+    from decimal import Decimal
+    assert Decimal(got[("AR_GROSS", "2024-12-31")]) - Decimal(got[("AR_BADDEBT", "2024-12-31")]) \
+        == Decimal("18974192.75")
 
 
 # ---------- G：核查报告生成 ----------
@@ -997,6 +1254,118 @@ def test_report_includes_summary_and_research_review():
     assert "1741.4" in text
 
 
+def test_csi_caveat_flags_provisional_and_all_na_dimensions():
+    """CSI 口径提示：口径未裁定或存在全「不适用」维度时，必须给出临时/不完整警示。"""
+    from src.report import _csi_caveat
+
+    assert _csi_caveat({"na_dimensions": [], "csi": 100.0}) == "", \
+        "无全 NA 维度且口径已裁定，不应输出警示"
+    c = _csi_caveat({"na_dimensions": ["C间", "C附"], "provisional": True,
+                     "profile": "default-provisional"})
+    assert "临时" in c and "不完整" in c
+    assert "C间" in c and "C附" in c and "2 个维度" in c
+    assert "provisional" in c
+
+
+def test_report_marks_csi_caveat_across_formats():
+    """存在全「不适用」维度时，PDF/Excel/网页三格式都必须标注 CSI 为临时/不完整结果。"""
+    from openpyxl import load_workbook
+    from src.pipeline import ROOT
+    from src.report import build_all
+
+    _make_run_fixture("pytest_report_caveat")
+    csi_path = ROOT / "runs" / "pytest_report_caveat" / "rules" / "csi.json"
+    csi = json.loads(csi_path.read_text(encoding="utf-8"))
+    csi.update({"provisional": True, "profile": "default-provisional",
+                "na_dimensions": ["C间", "C附"]})
+    csi_path.write_text(json.dumps(csi, ensure_ascii=False), encoding="utf-8")
+    made = build_all("pytest_report_caveat", ("html", "xlsx", "pdf"))
+
+    html = (ROOT / made["html"]).read_text(encoding="utf-8")
+    assert "口径提示" in html and "不完整" in html
+
+    wb = load_workbook(ROOT / made["xlsx"])
+    cells = [str(c.value) for row in wb["摘要"].iter_rows() for c in row if c.value]
+    assert any(v == "CSI 口径提示" for v in cells)
+    assert any("不完整" in v for v in cells)
+
+    with __import__("pdfplumber").open(ROOT / made["pdf"]) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    assert "口径提示" in text and "不完整" in text
+
+
+def test_report_no_csi_caveat_when_all_dimensions_applicable():
+    """全部维度均可执行且口径已裁定时，报告不得出现「不完整」之类的误导性警示。"""
+    from src.pipeline import ROOT
+    from src.report import build_all
+
+    _make_run_fixture("pytest_report_no_caveat")
+    made = build_all("pytest_report_no_caveat", ("html", "pdf"))
+
+    html = (ROOT / made["html"]).read_text(encoding="utf-8")
+    assert "口径提示" not in html and "不完整" not in html
+    with __import__("pdfplumber").open(ROOT / made["pdf"]) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    assert "口径提示" not in text
+
+
+def test_ratio_records_computed_from_main_statements():
+    """研报高频比率（毛利率/净利率/资产负债率）由程序确定性计算，逐期产出作为比对真值。"""
+    from src.derived import ratio_records
+
+    recs = ratio_records([
+        {"item_code": "REVENUE", "period": "2024", "period_type": "FY", "value": "1000"},
+        {"item_code": "OPERATING_COST", "period": "2024", "period_type": "FY", "value": "100"},
+        {"item_code": "TOTAL_ASSETS", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "1000"},
+        {"item_code": "TOTAL_LIAB", "period": "2024-12-31", "period_type": "BAL_END",
+         "value": "400"},
+    ])
+    by = {(r["item_code"], r["period"]): r for r in recs}
+    assert by[("RATIO_GROSS", "2024")]["value"] == "90.0"
+    assert by[("RATIO_GROSS", "2024")]["period_type"] == "FY"
+    assert by[("RATIO_LEV", "2024-12-31")]["value"] == "40.0"
+    assert by[("RATIO_LEV", "2024-12-31")]["period_type"] == "BAL_END"
+
+
+def test_research_check_compares_percent_ratio_claims():
+    """研报引用毛利率这类比率时，按程序计算的真值做确定性比对，而非一律转人工复核。"""
+    from src.derived import ratio_records
+    from src.research_check import check
+
+    recs = [
+        {"item_code": "REVENUE", "period": "2024", "period_type": "FY", "value": "1000"},
+        {"item_code": "OPERATING_COST", "period": "2024", "period_type": "FY", "value": "100"},
+    ]
+    matches = [{"claim_id": "c1", "item_code": "RATIO_GROSS", "period": "2024"},
+               {"claim_id": "c2", "item_code": "RATIO_GROSS", "period": "2024"}]
+    claims = {"c1": {"sentence": "2024年公司毛利率90.0%，保持稳定"},
+              "c2": {"sentence": "2024年公司毛利率95.0%，同比提升"}}
+    out = check(matches, claims, recs + ratio_records(recs))
+    got = {r["claim_id"]: r for r in out["results"]}
+    assert got["c1"]["status"] == "PASS"
+    assert got["c2"]["status"] == "FAIL" and got["c2"]["cause"] == "VALUE_ERROR"
+
+
+def test_new_research_fields_are_extractable_and_in_dictionary():
+    """v1.2 新增的研报高频科目必须同时出现在字段字典与主表提取映射里，否则等于没加。"""
+    import yaml
+    from src.pipeline import ROOT
+    from tools.extract_fields import LABEL_ALIASES
+
+    codes = set(yaml.safe_load(
+        (ROOT / "rules" / "fields.yaml").read_text(encoding="utf-8"))["fields"])
+    extracted = {v[0] for v in LABEL_ALIASES.values()}
+    for code in ("CONTRACT_LIAB", "AP", "SHORT_TERM_LOAN", "LONG_TERM_LOAN",
+                 "SELLING_EXPENSE", "ADMIN_EXPENSE", "RD_EXPENSE",
+                 "FIN_EXPENSE", "TAX_SURCHARGE", "RATIO_GROSS", "RATIO_NET", "RATIO_LEV"):
+        assert code in codes, f"{code} 未进字段字典"
+    for code in ("CONTRACT_LIAB", "AP", "SHORT_TERM_LOAN", "LONG_TERM_LOAN",
+                 "SELLING_EXPENSE", "ADMIN_EXPENSE", "RD_EXPENSE",
+                 "FIN_EXPENSE", "TAX_SURCHARGE"):
+        assert code in extracted, f"{code} 缺少主表提取映射"
+
+
 def test_na_dimensions_get_zero_normalized_weight():
     """不适用维度不得显示非零归一化权重——否则报告里会出现误导性的权重数字。"""
     from src.rules_engine import compute_csi
@@ -1023,7 +1392,8 @@ def test_web_app_renders_without_exception():
     assert [t.value for t in at.title] == ["财报一致性量化核查智能体"]
 
     labels = [m.label for m in at.metric]
-    assert "CSI" in labels and "提取字段" in labels
+    # CSI 指标卡在口径未裁定（provisional）时会带上「（临时）」后缀，故按前缀匹配
+    assert any(l.startswith("CSI") for l in labels) and "提取字段" in labels
     assert len(at.tabs) == 5
 
     # 切到有报告产物的运行，应出现下载按钮
@@ -1391,6 +1761,44 @@ def test_diff_desc_is_neutral_for_bad_unit():
 
 
 # ---------- J：标准答案与准确率 / 可复现性 ----------
+
+def test_accuracy_scope_text_marks_sampling_coverage():
+    """准确率文案必须说清：E 是金标准抽样结果，且给出金标准相对字段字典的覆盖率。"""
+    from src.report import _accuracy_scope
+
+    none_txt = " ".join(_accuracy_scope(None))
+    assert "未计算提取准确率 E" in none_txt
+
+    txt = " ".join(_accuracy_scope({
+        "E": 100.0, "correct": 46, "total": 46, "wrong": 0, "missing": 0,
+        "gold_file": "贵州茅台_2024_核心字段.json", "gold_entries": 46,
+        "dict_size": 86, "dict_coverage": round(46 / 86, 4),
+    }))
+    assert "抽样准确率" in txt and "不等同于字段字典全量准确率" in txt
+    assert "贵州茅台_2024_核心字段.json" in txt
+    assert "86 项" in txt and "%" in txt
+
+
+def test_report_includes_accuracy_section_in_all_formats():
+    """提取准确率（E）必须在 PDF / Excel / 网页三种报告中都出现（原来一处都没有）。"""
+    from openpyxl import load_workbook
+    from src.pipeline import ROOT
+    from src.report import build_all
+
+    _make_run_fixture("pytest_report_accuracy")
+    made = build_all("pytest_report_accuracy", ("html", "xlsx", "pdf"))
+
+    html = (ROOT / made["html"]).read_text(encoding="utf-8")
+    assert "提取准确率（E）" in html
+
+    wb = load_workbook(ROOT / made["xlsx"])
+    cells = [str(c.value) for row in wb["摘要"].iter_rows() for c in row if c.value]
+    assert any(v == "提取准确率" or "提取准确率" in v for v in cells)
+
+    with __import__("pdfplumber").open(ROOT / made["pdf"]) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    assert "提取准确率" in text
+
 
 def test_accuracy_compare_counts_correct_wrong_missing():
     """准确率 = 正确 ÷ 应提取；缺失与错误分别计数，不混为一谈。"""

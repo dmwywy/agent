@@ -64,7 +64,7 @@ def _post_checks(data: dict, task: str, context: dict | None) -> list[str]:
         ok, msg = check_evidence(data["evidence"], chunks)
         if not ok:
             errs.append(msg)
-    if task in ("gen_report_text", "gen_commentary") and ctx.get("allowed_numbers"):
+    if task == "gen_commentary" and ctx.get("allowed_numbers"):
         errs += check_no_amounts(data.get("text", ""), ctx["allowed_numbers"])
     return errs
 

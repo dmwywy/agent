@@ -1,5 +1,5 @@
 # test.py
-"""五个任务各跑一遍：验证 schema 校验路径，并生成缓存。
+"""三个任务各跑一遍：验证 schema 校验路径，并生成缓存。
 运行：python test.py            在线（首次真实调用，之后命中缓存）
       python test.py --offline  仅用缓存（评委复现，无需 Key、无需联网）"""
 import json, sys
@@ -7,7 +7,7 @@ from pathlib import Path
 from src.tasks import call_task, load_prompt
 from src.manifest import new_manifest, save_manifest, sha256_text
 from src.llm import MODEL_ID, PARAMS, BASE_URL
-from src.inputs import (build_match_item, build_unit_period,
+from src.inputs import (build_match_item,
                         build_match_claim, build_explain_anomaly)
 
 RUN_ID = "20260927_test"
@@ -20,13 +20,6 @@ CASES = [
         [{"code": "REVENUE", "name": "营业收入"},
          {"code": "TOTAL_REVENUE", "name": "营业总收入"}])),
 
-    ("unit_period", build_unit_period(
-        "p042_t1",
-        "合并资产负债表   单位：万元   2025年12月31日   2024年12月31日",
-        {"unit": ["元", "千元", "万元", "百万元", "亿元", "unknown"],
-         "scope": ["CONSOLIDATED", "PARENT"],
-         "period_type": ["FY", "YTD", "BAL_END", "BAL_BEG", "UNKNOWN"]})),
-
     ("match_claim", build_match_claim(
         [{"claim_id": "c01", "sentence": "公司2025年营业收入为120亿元，同比增长22%"}],
         [{"item_code": "REVENUE", "period": "FY2025"},
@@ -36,14 +29,9 @@ CASES = [
         "RF01", "研报引用值与财报值存在数量级差异", "p042_t1", "营业收入",
         ["UNIT_SCALE", "PERIOD_MISMATCH", "SCOPE_MIXED",
          "VALUE_ERROR", "SIGN_ERROR", "UNCERTAIN"])),
-
-    ("gen_report_text", {
-        "summary": "覆盖五个维度；多数规则通过；存在若干疑似不一致与待复核项",
-        "anomaly_items": ["营业收入"],
-    }),
 ]
 
-# [1] 先建清单（5 条提示词全部登记）
+# [1] 先建清单（3 条提示词全部登记）
 prompt_metas = []
 for task, _ in CASES:
     _text, meta = load_prompt(task)
