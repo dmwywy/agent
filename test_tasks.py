@@ -357,6 +357,33 @@ def test_financial_analysis_missing_inputs_warn_not_crash():
     assert any("毛利率" in w for w in one["warnings"])
 
 
+def test_financial_analysis_roic_skips_when_equity_missing_without_crash():
+    """ROIC 分支在 TOTAL_EQUITY 缺失时不得触发 TypeError。
+
+    `te is not None and (sl + ll + te) != 0` 靠 `and` 短路：te 为 None 时右侧加法
+    不会被求值，故不会因 `None + Decimal` 抛 TypeError；该情形应只记 warning、不产出 ROIC。
+    """
+    from src.financial_analysis import analyze
+    base = [{"item_code": "TOTAL_PROFIT", "period": "2024", "value": "100"},
+            {"item_code": "FIN_EXPENSE", "period": "2024", "value": "10"},
+            {"item_code": "INCOME_TAX", "period": "2024", "value": "25"},
+            {"item_code": "SHORT_TERM_LOAN", "period": "2024-12-31", "value": "5"},
+            {"item_code": "TOTAL_ASSETS", "period": "2024-12-31", "value": "1000"}]
+    res = analyze(base)                      # 无 TOTAL_EQUITY，求值必须走到结尾而不抛异常
+    assert "ROIC" not in {m["code"] for m in res["metrics"]}
+    assert any("投入资本回报率" in w for w in res["warnings"])
+    # 所有者权益存在但「短期借款＋长期借款＋所有者权益」合计为零 → 同样不产出、不崩溃
+    zero = [{"item_code": "TOTAL_PROFIT", "period": "2024", "value": "100"},
+            {"item_code": "FIN_EXPENSE", "period": "2024", "value": "10"},
+            {"item_code": "INCOME_TAX", "period": "2024", "value": "25"},
+            {"item_code": "SHORT_TERM_LOAN", "period": "2024-12-31", "value": "-100"},
+            {"item_code": "LONG_TERM_LOAN", "period": "2024-12-31", "value": "100"},
+            {"item_code": "TOTAL_EQUITY", "period": "2024-12-31", "value": "0"}]
+    res0 = analyze(zero)
+    assert "ROIC" not in {m["code"] for m in res0["metrics"]}
+    assert any("投入资本回报率" in w for w in res0["warnings"])
+
+
 def test_financial_analysis_names_basis_have_no_digits():
     """名称/单位/口径不得含阿拉伯数字——否则会污染数字白名单。"""
     import re
