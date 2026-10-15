@@ -1,26 +1,45 @@
 # -*- coding: utf-8 -*-
 """交互式启动器：环境自检 → 选择命令行 / 网页 → 检查 DeepSeek 配置 → 输入材料文件夹 → 运行。
 
-入口（二选一）：
-    双击仓库根目录的 `run.bat`
+三种入口等价：
+    双击仓库根目录的 `run.bat`（调用本脚本）
     或在项目根目录执行：python launcher.py
+    或双击 `launcher.exe`（PyInstaller 打包的同名外壳；exe 只做引导，核查仍用旁边的源码跑）
+
+被冻结成 exe 时（sys.frozen），本进程内部没有 Python 解释器，因此必须自行定位一个
+可用的解释器；本机完全没有 Python 时可自动下载官方内嵌运行时到 `.runtime/`。
 """
 from __future__ import annotations
 
+import glob
 import os
+import shutil
 import subprocess
 import sys
+import urllib.request
+import zipfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+FROZEN = bool(getattr(sys, "frozen", False))
+# exe 与源码版都以「文件所在目录」为项目根：exe 需与 fincheck/ src/ app.py 放在一起
+ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
+
 REQ = ROOT / "requirements.txt"
 ENV_FILE = ROOT / ".env"
+RUNTIME = ROOT / ".runtime"          # 自动下载的内嵌 Python 落在这里
 RUN_ID = "reproduce"
 
 # 依赖导入名（requirements.txt 里对应的包：openai / pydantic / PyYAML /
 # pdfplumber / reportlab / openpyxl / pandas / streamlit）
 NEEDED = ["openai", "pydantic", "yaml", "pdfplumber",
           "reportlab", "openpyxl", "pandas", "streamlit"]
+
+PY_MIN = (3, 10)
+EMBED_URL = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip"
+GETPIP_URL = "https://bootstrap.pypa.io/get-pip.py"
+DOWNLOAD_PAGE = "https://www.python.org/downloads/windows/"
+
+PY: list[str] = []                   # 解析出的解释器命令，如 ["python"] 或 ["C:/.../python.exe"]
 
 
 def line(text: str = "") -> None:
@@ -52,20 +71,130 @@ def mask(key: str) -> str:
     return key[:6] + "***" + key[-3:] if len(key) > 12 else "***"
 
 
+def _run(cmd: list[str], **kw) -> int:
+    return subprocess.call(cmd, cwd=ROOT, **kw)
+
+
+def _usable(cmd: list[str]) -> bool:
+    """解释器是否可用且版本达标。"""
+    try:
+        probe = subprocess.run(
+            cmd + ["-c", f"import sys;assert sys.version_info[:2]>={PY_MIN}"],
+            capture_output=True, timeout=60)
+        return probe.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _version(cmd: list[str]) -> str:
+    try:
+        probe = subprocess.run(cmd + ["-c", "import sys;print(sys.version.split()[0])"],
+                               capture_output=True, text=True, timeout=60)
+        return probe.stdout.strip() or "?"
+    except (OSError, subprocess.SubprocessError):
+        return "?"
+
+
+# ---------------------------------------------------------------- 0. 定位 / 下载解释器
+
+def find_python() -> list[str] | None:
+    """按 内置运行时 → PATH → py 启动器 → 常见安装路径 → 项目 .venv 的顺序探测。"""
+    candidates: list[list[str]] = []
+    embedded = RUNTIME / "python.exe"
+    if embedded.exists():
+        candidates.append([str(embedded)])
+    for name in ("python", "python3"):
+        found = shutil.which(name)
+        if found:
+            candidates.append([found])
+    if shutil.which("py"):
+        candidates.append(["py", "-3"])
+    for pattern in (r"C:\Python3*\python.exe",
+                    r"C:\Program Files\Python3*\python.exe",
+                    os.path.join(os.environ.get("LOCALAPPDATA", r"C:\Dummy"),
+                                 "Programs", "Python", "Python3*", "python.exe")):
+        for hit in sorted(glob.glob(pattern), reverse=True):
+            candidates.append([hit])
+    for parent in (ROOT, ROOT.parent):
+        for rel in (Path(".venv") / "Scripts" / "python.exe", Path("venv") / "Scripts" / "python.exe"):
+            p = parent / rel
+            if p.exists():
+                candidates.append([str(p)])
+
+    for cmd in candidates:
+        if _usable(cmd):
+            return cmd
+    return None
+
+
+def download_runtime() -> list[str] | None:
+    """下载官方内嵌 Python 到 `.runtime/`，并装好 pip（无需管理员权限、不改系统环境）。"""
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    zip_path = RUNTIME / "python-embed.zip"
+    line(f"  正在下载官方内嵌 Python 运行时（约 11 MB）……")
+    try:
+        urllib.request.urlretrieve(EMBED_URL, zip_path)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(RUNTIME)
+        zip_path.unlink()
+    except Exception as e:                                   # noqa: BLE001
+        line(f"  [!!] 下载或解压失败：{type(e).__name__}: {e}")
+        return None
+
+    # 内嵌版默认不给 pip：打开 ._pth 里的 import site，再跑 get-pip.py
+    for pth in RUNTIME.glob("python*._pth"):
+        text = pth.read_text(encoding="utf-8")
+        pth.write_text(text.replace("#import site", "import site"), encoding="utf-8")
+    getpip = RUNTIME / "get-pip.py"
+    line("  正在安装 pip……")
+    try:
+        urllib.request.urlretrieve(GETPIP_URL, getpip)
+        if _run([str(RUNTIME / "python.exe"), str(getpip)]) != 0:
+            line("  [!!] pip 安装失败")
+            return None
+    except Exception as e:                                   # noqa: BLE001
+        line(f"  [!!] pip 下载或安装失败：{type(e).__name__}: {e}")
+        return None
+    finally:
+        getpip.unlink(missing_ok=True)
+
+    cmd = [str(RUNTIME / "python.exe")]
+    return cmd if _usable(cmd) else None
+
+
 # ---------------------------------------------------------------- 1. 环境自检
 
-def check_deps() -> bool:
-    step("[1/4] 环境自检")
-    try:
-        print(f"  Python  {sys.version.split()[0]}  ({sys.executable})")
-    except Exception:                                        # noqa: BLE001
-        pass
+def check_python() -> list[str] | None:
+    step("[1/4] 环境自检 · Python 解释器")
+    cmd = find_python()
+    if cmd:
+        line(f"  [OK] 已找到 Python {_version(cmd)}（{cmd[0]}）")
+        return cmd
 
+    line("  [!!] 本机未检测到可用的 Python（需 3.10+）。")
+    line("  1) 自动下载官方内嵌运行时到项目 .runtime/（约 11 MB，不改系统环境）")
+    line("  2) 打开官方下载页，自己安装（记得勾选 “Add Python to PATH”）")
+    if ask("  请输入 1 或 2（默认 1）：", "1") == "2":
+        print(f"  下载页：{DOWNLOAD_PAGE}")
+        if sys.platform.startswith("win"):
+            try:
+                os.startfile(DOWNLOAD_PAGE)                 # noqa: S606
+            except OSError:
+                pass
+        return None
+    cmd = download_runtime()
+    if cmd:
+        line(f"  [OK] 运行时就绪：{cmd[0]}")
+    return cmd
+
+
+def check_deps(cmd: list[str]) -> bool:
+    step("[1/4] 环境自检 · 依赖包")
+    line(f"  Python  {_version(cmd)}  ({cmd[0]})")
     missing = []
     for mod in NEEDED:
-        try:
-            __import__(mod)
-        except ImportError:
+        probe = subprocess.run(cmd + ["-c", f"import {mod}"], capture_output=True)
+        if probe.returncode != 0:
             missing.append(mod)
 
     if not missing:
@@ -74,8 +203,7 @@ def check_deps() -> bool:
 
     line(f"  缺少依赖：{', '.join(missing)}")
     line("  正在自动安装：python -m pip install -r requirements.txt")
-    rc = subprocess.call([sys.executable, "-m", "pip", "install", "-r", str(REQ)],
-                         cwd=ROOT)
+    rc = _run(cmd + ["-m", "pip", "install", "-r", str(REQ)])
     if rc != 0:
         line("  [!!] 自动安装失败。请手动执行：python -m pip install -r requirements.txt")
         return False
@@ -159,7 +287,7 @@ def run_cli(online: bool) -> int:
         "  请输入材料文件夹路径（直接回车 = 使用仓库自带 demo 数据）："))
     line()
 
-    cmd = [sys.executable, "-m", "fincheck"]
+    cmd = PY + ["-m", "fincheck"]
     if folder:
         line(f"  材料文件夹：{folder}")
         cmd += ["ingest", "--from", folder, "--run-id", RUN_ID]
@@ -171,7 +299,7 @@ def run_cli(online: bool) -> int:
     line(f"  运行模式：{'在线' if online else '离线'}")
     line()
 
-    rc = subprocess.call(cmd, cwd=ROOT)
+    rc = _run(cmd)
     if rc != 0:
         line("  [!!] 流程执行失败，请按上面的提示处理后重跑。")
         return rc
@@ -192,16 +320,49 @@ def run_web() -> int:
     line("  正在启动网页界面，浏览器会自动打开 http://localhost:8501")
     line("  关闭网页服务：在本窗口按 Ctrl+C")
     line()
-    return subprocess.call([sys.executable, "-m", "streamlit", "run", str(ROOT / "app.py")],
-                           cwd=ROOT)
+    return _run(PY + ["-m", "streamlit", "run", str(ROOT / "app.py")])
+
+
+def _setup_console() -> None:
+    """冻结成 exe 时统一按 UTF-8 输出。
+
+    PyInstaller 外壳进程与它拉起的 python 子进程可能用不同编码写同一个控制台，
+    导致「启动器自己的中文乱码、子进程的正常」。这里把控制台代码页、自身流编码
+    与子进程编码（PYTHONIOENCODING）统一成 UTF-8，两边就一致了。
+    源码模式（python launcher.py）沿用控制台原有编码，不改动。
+    """
+    if not FROZEN:
+        return
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        except Exception:                                    # noqa: BLE001
+            pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 def main() -> int:
+    global PY
+    _setup_console()
     line()
     line("  财报一致性量化核查智能体 · 交互式启动器")
     line("  （离线模式不需要网络与 API Key，可直接用于评审复现）")
 
-    if not check_deps():
+    found = check_python()
+    if found is None:
+        line()
+        line("  已退出：请安装 Python 3.10+ 后重新运行本程序。")
+        return 1
+    PY[:] = found
+
+    if not check_deps(PY):
         return 1
 
     if choose_mode() == "2":

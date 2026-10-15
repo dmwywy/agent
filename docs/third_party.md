@@ -88,6 +88,12 @@
 
 ---
 
+## 4.1 构建工具（可选，仅打包 `launcher.exe` 时使用）
+
+| 名称 | 版本 | 来源 | 许可证 | 具体使用范围 |
+|---|---|---|---|---|
+| PyInstaller | 6.22.3 | https://pyinstaller.org（PyPI 分发） | GPL-2.0-or-later，附「打包产物不受 GPL 约束」的例外条款（见上游 LICENSE.txt） | 仅由 `build_exe.bat` 调用，把 `launcher.py` 打成单文件 `launcher.exe`。**不在 `requirements.txt` 内、运行时不 import**；exe 内只有启动器外壳，不含任何第三方库源码、模型或数据。不使用 exe 时该工具完全不参与评测流程（用 `run.bat` / `python launcher.py` 即可）。 |
+
 ## 5. 提交合规结论
 
 1. 上列第三方库均为公开发布的开源软件（除 DeepSeek API 为商业服务），**随源码提交的只有本仓库自身代码**，

@@ -127,10 +127,16 @@ Windows 下**双击仓库根目录的 `run.bat`**（它只是 `python launcher.p
 
     python launcher.py
 
+也可以直接双击 **`launcher.exe`**（PyInstaller 打包的同名外壳，约 8.5 MB）。它只做
+「检测环境 → 引导 → 拉起源码」，真正的核查逻辑仍用旁边的 Python 源码跑；**本机没有 Python 时，
+它会自动下载官方内嵌运行时到 `.runtime/`**（约 11 MB，不改系统环境），所以免装环境也能用。
+重新打包：双击 `build_exe.bat`。
+
 之后按提示逐步操作即可，**全程无需改动任何文件**：
 
 1. **环境自检**：检查 Python 与依赖，缺依赖自动执行 `pip install -r requirements.txt`；
-   若本机没有 Python，`run.bat` 会提示并打开官方下载页（安装时勾选 “Add Python to PATH”）。
+   若本机没有 Python：`launcher.exe` 会自动下载内嵌运行时，`run.bat` 则提示并打开官方下载页
+   （自行安装时勾选 “Add Python to PATH”）。
 2. **选择运行方式**：`1` 命令行（跑完直接出 PDF / Excel / 网页三端报告）/ `2` 网页（自动打开浏览器界面）。
 3. **检查 DeepSeek 配置**：`.env` 中已有 `DEEPSEEK_API_KEY` 时，让你选在线 / 离线；
    没有时让你输入 Key（写入 `.env`，该文件已 gitignore，不会提交），或直接回车跳过走离线。
@@ -140,10 +146,10 @@ Windows 下**双击仓库根目录的 `run.bat`**（它只是 `python launcher.p
 5. **运行**：命令行分支复用 `fincheck`（`ingest` / `run` 并自动生成三端报告）；
    网页分支启动 `streamlit run app.py`。
 
-> **关于 exe**：本作品**不打包 exe，也不建议打包**。大赛要求提交**完整源代码 + 依赖文件 + 运行
-> 说明**，双击 `run.bat` 已经等效于 exe 的使用体验；而 PyInstaller 打包 Streamlit 项目需处理
-> 静态资源钩子、产物体积数百 MB、构建排错成本高，对评审没有额外加分。若确需单个可执行文件，
-> 可作为截止后的可选项单独处理，不影响交付完整性。
+> **关于 exe**：`launcher.exe` 只打包了**启动器外壳**，没有把 Streamlit 应用整体塞进去——
+> 那样会有数百 MB、还需处理静态资源钩子，构建脆弱且对评审没有额外加分。大赛要求提交
+> **完整源代码 + 依赖文件 + 运行说明**，本仓库三者齐备；exe 只是给「不想敲命令」的使用者
+> 多留一个入口，三条入口（`run.bat` / `launcher.py` / `launcher.exe`）行为完全一致。
 
 ---
 
@@ -500,6 +506,8 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     ├── test_tasks.py         任务 / 提示词 / 校验 / MCP 协议测试
     ├── run.bat              双击入口（薄包装，仅调用 launcher.py）
     ├── launcher.py           交互式启动器：环境自检 → 选命令行/网页 → 填 Key → 选材料 → 运行
+    ├── launcher.exe          launcher.py 的 exe 外壳（免装 Python，缺环境自动下载内嵌运行时）
+    ├── build_exe.bat        重新打包 launcher.exe（PyInstaller）
     ├── fincheck/
     │   └── __main__.py       CLI 入口：run / ingest / report 与运行摘要
     ├── mcp_server/           MCP 服务（stdio JSON-RPC 2.0，标准库实现，零新增依赖）
