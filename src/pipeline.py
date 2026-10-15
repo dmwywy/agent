@@ -17,7 +17,7 @@ from pathlib import Path
 import yaml
 
 from src.inputs import MAX_ITEMS, build_match_claim, build_match_item
-from src.research_check import run_research_check
+from src.research_check import dedup_claim_matches, run_research_check
 from src.tasks import call_task, load_prompt
 from src.manifest import new_manifest, save_manifest
 
@@ -230,11 +230,18 @@ def run_match_claim(claims_path: str, records: list[dict], run_id: str, offline:
 
     claim_by_id = {c["claim_id"]: c for c in claims}
     enriched = _attach_claim_evidence(matches, claim_by_id)
-    matched_ids = {m["claim_id"] for m in matches}
+    # 去多义化：同一指标在同句被枚举多个期间时只留年份对得上的；句中无年份可对应
+    # （列头年份在抽取时丢失，典型是预测表行）则整条转人工复核，不硬判对错。
+    enriched, ambiguous = dedup_claim_matches(enriched)
+    matched_ids = {m["claim_id"] for m in enriched}
+    ambiguous_ids = {a["claim_id"] for a in ambiguous}
     # 模型漏答的 claim：不猜测，一律进人工复核
     unmatched = [{"claim_id": c["claim_id"], "reason": "模型未返回该条的匹配结果",
                   "sentence": c["sentence"]}
-                 for c in claims if c["claim_id"] not in matched_ids]
+                 for c in claims
+                 if c["claim_id"] not in matched_ids
+                 and c["claim_id"] not in ambiguous_ids]
+    unmatched.extend(ambiguous)
     _write_json(run_id, "llm/claim_matches.json", {
         "run_id": run_id,
         "status": "|".join(dict.fromkeys(flat_status)),

@@ -721,6 +721,88 @@ def test_research_check_passes_within_tolerance():
     assert out["results"][0]["status"] == "PASS"
 
 
+def test_research_check_forecast_table_row_is_review_not_fail():
+    """预测/多列表格行不得硬判，转 REVIEW——避免张冠李戴的误报。
+
+    回归背景（2025 批实测）：「毛利率 | 92.1% | 91.3% | …」的 92.1% 实为 2026E、
+    「资产负债率 | 22.0% | …」的 22.0% 实为预测期，却被贴到 2025/2023/2024，
+    凭空产出 4 条「异常」（标准答案并未植错）。
+    """
+    from src.research_check import check
+    matches = [{"claim_id": "c1", "item_code": "RATIO_GROSS", "period": "2025",
+                "evidence": {}}]
+    claims = {"c1": {"sentence": "毛利率 | 92.1% | 91.3% | 90.6% | 90.4% | 90.6%"}}
+    records = [{"item_code": "RATIO_GROSS", "period": "2025", "period_type": "FY",
+                "value": "91.2"}]
+    out = check(matches, claims, records)
+    assert out["results"] == []
+    assert out["review"][0]["status"] == "REVIEW"
+    assert "预测" in out["review"][0]["reason"]
+
+
+def test_research_check_accepts_parent_net_margin_as_same_item():
+    """研报口语的"净利率"写成归母口径时按口径差异处理，不得判为引用错误。
+
+    回归背景（2025 批）：研报 47.8% 是归母净利率（程序算得 47.8），而主口径
+    净利润÷营业总收入 = 49.6，此前被判 FAIL——属假阳性。
+    """
+    from src.research_check import check
+    records = [
+        {"item_code": "RATIO_NET", "period": "2025", "period_type": "FY", "value": "49.6"},
+        {"item_code": "NET_PROFIT", "period": "2025", "period_type": "FY",
+         "value": "85278542558.43"},
+        {"item_code": "TOTAL_REVENUE", "period": "2025", "period_type": "FY",
+         "value": "172054171890.91"},
+        {"item_code": "NP_PARENT", "period": "2025", "period_type": "FY",
+         "value": "82320067101.68"},
+    ]
+    matches = [{"claim_id": "c1", "item_code": "RATIO_NET", "period": "2025",
+                "evidence": {}}]
+    claims = {"c1": {"sentence": "2025 年净利率同比-1.67pcts至 47.8%，截至年末合同负债环比增加。"}}
+    out = check(matches, claims, records)
+    r = out["results"][0]
+    assert r["status"] == "PASS" and "口径差异" in r["reason"]
+
+
+def test_margin_alt_truth_returns_none_when_not_applicable():
+    """非净利率科目或缺数据时不产出备选口径真值——不猜、不补。"""
+    from src.research_check import _index_records, margin_alt_truth
+    idx = _index_records([{"item_code": "RATIO_GROSS", "period": "2025", "value": "91.2"}])
+    assert margin_alt_truth("RATIO_GROSS", "2025", idx) is None
+    assert margin_alt_truth("RATIO_NET", "2025", idx) is None
+
+
+def test_dedup_claim_matches_demotes_multi_period_without_year():
+    """同一指标被枚举多个期间且句中无年份 → 整组转人工复核，不留互相矛盾的多条结果。"""
+    from src.research_check import dedup_claim_matches
+    matches = [
+        {"claim_id": "c1", "item_code": "RATIO_LEV", "period": p,
+         "evidence": {"sentence": "资产负债率 | 22.0% | 19.5% | 19.3% | 19.1%"}}
+        for p in ("2023-12-31", "2024-12-31", "2025-12-31")
+    ]
+    kept, demoted = dedup_claim_matches(matches)
+    assert kept == [] and len(demoted) == 1
+    assert demoted[0]["item_code"] == "RATIO_LEV" and "期间无法对齐" in demoted[0]["reason"]
+
+
+def test_dedup_claim_matches_keeps_other_items_and_year_matched():
+    """句中有对应年份时保留；同句其他指标的匹配不得被连带丢弃。"""
+    from src.research_check import dedup_claim_matches
+    sent = "2025 年营业总收入 1720.5 亿元，归母净利润 823.2 亿元"
+    matches = [
+        {"claim_id": "c1", "item_code": "TOTAL_REVENUE", "period": "2025",
+         "evidence": {"sentence": sent}},
+        {"claim_id": "c1", "item_code": "NP_PARENT", "period": "2025",
+         "evidence": {"sentence": sent}},
+        {"claim_id": "c1", "item_code": "TOTAL_REVENUE", "period": "2024",
+         "evidence": {"sentence": sent}},
+    ]
+    kept, demoted = dedup_claim_matches(matches)
+    assert demoted == []
+    assert sorted((m["item_code"], m["period"]) for m in kept) == [
+        ("NP_PARENT", "2025"), ("TOTAL_REVENUE", "2025")]
+
+
 # ---------- E：文件夹入口 ----------
 
 def test_year_from_name():
@@ -2173,6 +2255,40 @@ def test_match_claim_returns_unmatched_for_review(monkeypatch):
         saved = json.loads(
             (base / "llm" / "claim_matches.json").read_text(encoding="utf-8"))
         assert saved["matches"] == [] and len(saved["review"]) == 2
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_match_claim_dedups_ambiguous_periods_into_review(monkeypatch):
+    """同一指标被枚举多个期间、句中又无年份时必须去重并转人工复核。
+
+    回归背景（2025 批）：「资产负债率 | 22.0% | …」被模型展开成 2023/2024/2025
+    三个期间，同一数值被拿去比三年的财报，产出 3 条互相矛盾的「异常」。
+    """
+    import shutil
+    from src import pipeline
+    from src.pipeline import ROOT, run_match_claim
+
+    run_id = "pytest_match_claim_dedup"
+    base = ROOT / "runs" / run_id
+    shutil.rmtree(base, ignore_errors=True)
+    base.mkdir(parents=True)
+    (base / "claims.json").write_text(json.dumps([
+        {"claim_id": "a::1", "sentence": "资产负债率 | 22.0% | 19.5% | 19.3%",
+         "source": "模拟研报.docx", "section": "盈利预测"},
+    ], ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(
+        pipeline, "_match_claim_batched",
+        lambda *a, **k: ([{"claim_id": "a::1", "item_code": "RATIO_LEV", "period": p}
+                          for p in ("2023-12-31", "2024-12-31", "2025-12-31")], ["API_OK"]))
+    try:
+        matches, _status, unmatched = run_match_claim(
+            f"runs/{run_id}/claims.json", [], run_id, offline=True)
+        assert matches == [], "同一指标的多个期间应全部转人工复核"
+        assert len(unmatched) == 1 and "期间无法对齐" in unmatched[0]["reason"]
+        saved = json.loads(
+            (base / "llm" / "claim_matches.json").read_text(encoding="utf-8"))
+        assert saved["matches"] == [] and len(saved["review"]) == 1
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

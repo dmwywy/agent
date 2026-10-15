@@ -80,6 +80,16 @@ ALIASES = {
 RATIO_CODES = {"RATIO_GROSS", "RATIO_NET", "RATIO_LEV"}
 PCT_RE = re.compile(r"(-?)\s*(\d[\d,]*(?:\.\d+)?)\s*%")
 
+# 净利率口径互认：研报口语里的"净利率"经常写的是**归母净利率**（茅台 2025 即如此：
+# 研报 47.8% 实为归母口径，而程序真值 NET_PROFIT/TOTAL_REVENUE = 49.6%）。
+# 两个口径都由程序从同一批结构化数据算出。主口径判不一致时，用另一口径复核一次：
+# 落在容差内即视为**列报口径不同**而非引用错误，避免拿两个口径互相扣分。
+MARGIN_ALT = {"RATIO_NET": "RATIO_NPP", "RATIO_NPP": "RATIO_NET"}
+MARGIN_PARTS = {"RATIO_NET": ("NET_PROFIT", "TOTAL_REVENUE"),
+                "RATIO_NPP": ("NP_PARENT", "TOTAL_REVENUE")}
+MARGIN_ZH = {"RATIO_NET": "净利率（净利润÷营业总收入）",
+             "RATIO_NPP": "归母净利率（归母净利润÷营业总收入）"}
+
 # 金额与它的"主语指标名"之间允许的最大字符距离。
 # 没有这个约束，"吨价 314.4 万元"会被挂到远在句首的"茅台酒"上，又变误报。
 MAX_NAME_GAP = 20
@@ -102,12 +112,53 @@ def _index_records(records: list[dict]) -> dict:
     return idx
 
 
+def margin_alt_truth(code: str, period: str, idx: dict) -> Decimal | None:
+    """算出同一期间的**另一净利率口径**真值（见 MARGIN_ALT）；不适用或数据不全返回 None。
+
+    真值同样由程序从结构化数据算，不让模型参与；精度与 derived 一致（百分数保留一位小数）。
+    """
+    alt = MARGIN_ALT.get(code)
+    parts = MARGIN_PARTS.get(alt) if alt else None
+    if not parts:
+        return None
+    num_recs, den_recs = idx.get((parts[0], period)), idx.get((parts[1], period))
+    if not num_recs or not den_recs:
+        return None
+    try:
+        num = Decimal(str(num_recs[0]["value"]).replace(",", "").strip())
+        den = Decimal(str(den_recs[0]["value"]).replace(",", "").strip())
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if den == 0:
+        return None
+    return (num / den * 100).quantize(Decimal("0.1"))
+
+
 def _display_names(fields: dict) -> dict:
     """标准科目编号 -> 中文正式名，用于在句子里定位指标。"""
     return {code: m.get("zh", code) for code, m in fields.items()}
 
 
 QUARTER_RE = re.compile(r"Q[1-4]|第[一二三四]季度|上半年|中报|半年度")
+
+# 预测/多列表格行：研报的盈利预测表被抽取器压成一行，列头年份在抽取时丢失，
+# 典型形态是「毛利率 | 92.1% | 91.3% | 90.6% | 90.4% | 90.6%」。此时行内数值
+# 与年份列无法对齐，拿"行内第一个数值"去比某一期财报必然张冠李戴——实测
+# 92.1% 实为 2026E、22.0% 实为预测期，却被贴到 2025/2023/2024，凭空产出 4 条误报。
+PIPE_RE = re.compile(r"\|")
+NUM_TOKEN_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+YEAR_TOKEN_RE = re.compile(r"20\d{2}")
+FORECAST_MARKER_RE = re.compile(r"预计|预测|展望|指引")
+
+
+def is_forecast_row(sentence: str) -> bool:
+    """判断句子是否为「无法对齐期间的预测行/多列表格行」。只用于把误报降级为复核。"""
+    n = len(NUM_TOKEN_RE.findall(sentence))
+    if len(PIPE_RE.findall(sentence)) >= 2 and n >= 3:
+        return True                       # 表格行：整行同型数值，列头年份已丢失
+    return (bool(FORECAST_MARKER_RE.search(sentence))
+            and n >= 3
+            and not YEAR_TOKEN_RE.search(sentence))   # 展望句：无年份可对齐
 
 
 def _mentions(sentence: str, zh_map: dict) -> list[tuple[int, int, str]]:
@@ -259,6 +310,13 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
         sentence = claim.get("sentence", "")
         rec = recs[0]
 
+        # 预测/多列表格行：列头年份在抽取时丢失，行内数值与年份列无法对齐
+        # （见 is_forecast_row）。此时硬判必然张冠李戴，转人工复核。
+        if is_forecast_row(sentence):
+            skipped.append({**base, "status": "REVIEW",
+                            "reason": "研报为预测/多列表格行（列头年份缺失），期间无法对齐，需人工复核"})
+            continue
+
         # 期间不许混（interfaces.md §1.5）：研报写的是单季/半年度数，财报记录是全年累计，
         # 两者不可比。直接判不可比而不是判错——否则每句"Q4实现…"都会变成一条误报。
         if QUARTER_RE.search(sentence) and rec.get("period_type") == "FY":
@@ -294,6 +352,19 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
         else:
             ok = abs(diff) <= tol
             cause, reason = ("", "") if ok else classify_diff(fig["value"], truth)
+            if not ok:
+                # 口径互认：换另一净利率口径复核一次（见 MARGIN_ALT）。研报口语的
+                # "净利率"常写归母口径，与主口径（净利润÷营业总收入）本就不同值——
+                # 差异属列报口径不同，不是引用错误，判 PASS 并注明依据。
+                alt = margin_alt_truth(code, period, idx)
+                if alt is not None and abs(fig["value"] - alt) <= tolerance_for(
+                        profile, fig["value"], alt):
+                    ok, cause = True, ""
+                    truth = alt
+                    diff = fig["value"] - truth
+                    tol = tolerance_for(profile, fig["value"], truth)
+                    reason = (f"口径差异：研报表述与「{MARGIN_ZH[MARGIN_ALT[code]]}」"
+                              f"一致（{truth}），非引用错误")
 
         results.append({
             **base,
@@ -311,6 +382,51 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
             "truth_chunk_id": recs[0].get("chunk_id"),
         })
     return {"results": results, "review": skipped}
+
+
+def dedup_claim_matches(matches: list[dict]) -> tuple[list[dict], list[dict]]:
+    """同一指标在同一句里被枚举多个期间时**去多义化**。返回 (保留, 转人工复核)。
+
+    一句研报引用通常只对应一个期间。模型偶尔会对同一指标枚举多个期间（实测：一句
+    「资产负债率 | 22.0% | 19.5% | …」被展开成 2023/2024/2025 三个期间，同一数值
+    被拿去比三年的财报，凭空产出 3 条互相矛盾的「异常」）。规则：
+
+      - 只保留 period 中的年份在句子里**显式出现**的那几条；
+      - 句中没有任何年份可对应 → 说明列头年份在抽取时已丢失，整组转人工复核，
+        不用"行内第一个数值"去强行比对；
+      - 不同指标（同句多指标各一条）不受影响，只有同名指标的重复期间才去重。
+    """
+    sent_by_id: dict[str, str] = {}
+    for m in matches:
+        sent_by_id.setdefault(m.get("claim_id"),
+                              (m.get("evidence") or {}).get("sentence") or "")
+    by_claim: dict[str, list[dict]] = {}
+    for m in matches:
+        by_claim.setdefault(m.get("claim_id"), []).append(m)
+
+    kept: list[dict] = []
+    demoted: list[dict] = []
+    for cid, ms in by_claim.items():
+        sentence = sent_by_id.get(cid) or ""
+        years = set(YEAR_TOKEN_RE.findall(sentence))
+        by_code: dict[str, list[dict]] = {}
+        for m in ms:
+            by_code.setdefault(m.get("item_code") or "", []).append(m)
+        for code, group in by_code.items():
+            if len(group) == 1:
+                kept.extend(group)
+                continue
+            hit = [m for m in group
+                   if set(YEAR_TOKEN_RE.findall(str(m.get("period") or ""))) & years]
+            if hit:
+                kept.extend(hit)
+            else:
+                demoted.append({
+                    "claim_id": cid, "item_code": code, "period": None,
+                    "reason": "同句命中多个期间且句中无对应年份，期间无法对齐，转人工复核",
+                    "sentence": sentence,
+                })
+    return kept, demoted
 
 
 def run_research_check(claims_path: str, matches: list[dict],
