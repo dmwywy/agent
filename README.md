@@ -358,11 +358,23 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
 推理参数 + 输入数据」算出，改动其中任一项都会让 mock 失效（表现为
 `NO_CACHE_OFFLINE`），需重新生成。
 
+### 13. MCP 服务（stdio，零新增依赖）
+
+    python -m mcp_server              # 启动 MCP 服务（stdio，供 MCP 客户端连接）
+    python -m mcp_server --selftest   # 离线自检：不发网络请求、不调模型
+
+把本项目的核查能力以标准工具形式暴露给 MCP 客户端（仓库根 `.mcp.json` 为接入配置样例）。
+暴露 **5 个工具**（`fincheck_ingest` / `fincheck_run` / `fincheck_report` /
+`calculate_ratios` / `check_consistency`）与 **3 个资源**（`fincheck://runs`、
+`fincheck://runs/{run_id}/manifest.json`、`fincheck://runs/{run_id}/rules/csi.json`）。
+实现见 `mcp_server/server.py`（标准库 stdio JSON-RPC 2.0，**不新增任何依赖**），
+接口设计见 `docs/MCP接口设计.md`。MCP 层是既有函数/入口的**薄封装**，产物与 CLI 逐字节一致。
+
 ### 12. 汇总测试
 
     python -m pytest -q
 
-**当前状态（2026-10-15）**：收集 **109** 项 / **全部通过（109 passed / 0 failed）**。
+**当前状态（2026-10-16）**：收集 **149** 项 / **全部通过（149 passed / 0 failed）**。
 此前唯一红项 `test_web_app_handles_run_without_report` 已修复：`app.py` 报告下载页
 原先把「有没有报告」的判断与提示**一并**放进 `if tab5.open:` 惰性页签渲染门控，
 未打开该页签时 `streamlit.testing` 的 AppTest 取不到该提示文案；现改为只对
@@ -451,36 +463,43 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     ├── .env                  凭据文件，不提交
     ├── .env.example          变量模板，提交
     ├── .gitignore
+    ├── .mcp.json             MCP 客户端连接配置（stdio，指向 mcp_server）
     ├── requirements.txt      锁定依赖
     ├── README.md             运行说明
     ├── app.py                网页入口（Streamlit）
     ├── check_key.py          密钥配置诊断
     ├── test.py               最小调用测试
     ├── testcontract.py       契约自检
-    ├── test_tasks.py         任务 / 提示词 / 校验测试（含返回结构与证据校验）
+    ├── test_tasks.py         任务 / 提示词 / 校验 / MCP 协议测试
     ├── fincheck/
     │   └── __main__.py       CLI 入口：run / ingest / report 与运行摘要
+    ├── mcp_server/           MCP 服务（stdio JSON-RPC 2.0，标准库实现，零新增依赖）
+    │   ├── __init__.py
+    │   ├── __main__.py       `python -m mcp_server` 入口与 --selftest
+    │   └── server.py         5 个 Tool + 3 个 Resource + 协议分发
     ├── configs/
-    │   ├── demo.yaml         初赛运行配置
+    │   ├── demo.yaml         运行配置
     │   └── model.yaml        模型与推理参数声明（`src/llm.py` 启动时加载）
     ├── docs/
     │   ├── interfaces.md     接口契约
+    │   ├── field_mapping_v1.md  字段清单（由 rules/fields.yaml 导出）
     │   ├── model_adapter_contract.md  模型接口确认版
-    │   ├── model_plan.md / model_plan_simple.md  模型调用方案
     │   ├── third_party.md    第三方依赖与模型清单
-    │   ├── 决赛交付与模块映射.md  模块映射与缺口说明
-    │   ├── MCP接口设计.md    MCP 模块接口设计（规划中，未接入运行时）
-    │   └── evidence/         验证与演练截图
+    │   ├── MCP接口设计.md    MCP 模块接口设计（已实现）
+    │   ├── 决赛交付与模块映射.md  模块映射与交付说明
+    │   ├── evidence/         验证与演练截图
+    │   └── 内部/             过程草稿与内部文档（不参与交付）
     ├── prompts/              4 个提示词（内容哈希写入 manifest）
     │   ├── match_item.txt    科目归一化
     │   ├── match_claim.txt   研报引用匹配
     │   ├── explain_anomaly.txt  异常原因解释
     │   └── gen_commentary.txt   报告定性文字（研报式评价）
-    ├── skills/               8 个 SKILL.md（声明式，不接入运行时）
-    │   ├── match_item/SKILL.md     科目归一化
-    │   ├── match_claim/SKILL.md    研报引用匹配
-    │   ├── explain_anomaly/SKILL.md 异常原因解释
-    │   ├── gen_commentary/SKILL.md  报告定性文字（研报式评价）
+    ├── skills/               9 个 SKILL.md（声明式，不接入运行时）
+    │   ├── match_item/SKILL.md     科目归一化（模型侧）
+    │   ├── match_claim/SKILL.md    研报引用匹配（模型侧）
+    │   ├── explain_anomaly/SKILL.md 异常原因解释（模型侧）
+    │   ├── gen_commentary/SKILL.md  报告定性文字（模型侧）
+    │   ├── audit_claims/SKILL.md    研报语义审计（模型侧，清单外疑点）
     │   ├── financial-ratio-calculator/SKILL.md  财务比率计算（确定性）
     │   ├── consistency-checker/SKILL.md         一致性核查（封装 27 条规则）
     │   ├── field-extractor/SKILL.md             字段提取
@@ -518,10 +537,14 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     ├── data/
     │   ├── demo/             样例材料（含研报 claims）
     │   ├── gold_standard/    人工标准答案
+    │   ├── mock/             离线 mock 联调输入/输出 fixture
     │   └── structured/       解析输出的结构化数据
+    ├── 交付材料/             评审交付物
+    │   ├── 交付与运行说明.md  环境、安装、三种入口、一键复现、模块映射
+    │   ├── 项目工作总结.md    目标、完成工作、关键结果、遗留项
+    │   └── 样例核查报告/      一次完整运行的 PDF / Excel / HTML 报告
     └── runs/
-        ├── demo_baseline/    基准运行结果（提交，用于离线复现）
-        └── <run_id>/         各次运行产物（不提交）
+        └── demo_baseline/    基准运行结果（提交，用于离线复现）
 
 ---
 

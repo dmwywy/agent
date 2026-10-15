@@ -2939,3 +2939,46 @@ def test_legacy_products_without_fingerprint_are_recomputed():
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
+
+# ---- MCP 服务：stdio JSON-RPC 往返必须真实可用（评审要求 Tool / MCP 核心模块） ----
+
+def test_mcp_server_stdio_protocol_roundtrip():
+    """以子进程启动 `python -m mcp_server`，走真实 stdio JSON-RPC 往返。
+
+    验证六条消息：initialize 协商、通知不响应、tools/list 清单、tools/call
+    （确定性工具 calculate_ratios）、resources/list，以及未知方法回 -32601。
+    """
+    import subprocess
+    import sys
+    from mcp_server.server import PROTOCOL_VERSION, TOOLS
+
+    root = Path(__file__).resolve().parent
+    messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
+                    "clientInfo": {"name": "pytest", "version": "0"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},   # 通知：不应有响应
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+         "params": {"name": "calculate_ratios", "arguments": {"records": [
+             {"item_code": "TOTAL_REVENUE", "period": "2024", "value": "1741.4"},
+             {"item_code": "NET_PROFIT", "period": "2024", "value": "862.3"}]}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "resources/list"},
+        {"jsonrpc": "2.0", "id": 5, "method": "no/such-method"},
+    ]
+    payload = "".join(json.dumps(m, ensure_ascii=False) + "\n" for m in messages)
+    proc = subprocess.run([sys.executable, "-m", "mcp_server"], input=payload,
+                          capture_output=True, text=True, cwd=root, timeout=180)
+    assert proc.returncode == 0, proc.stderr
+    lines = [json.loads(x) for x in proc.stdout.splitlines() if x.strip()]
+    assert len(lines) == 5, f"6 条消息里通知不响应，应回 5 条；实际 {len(lines)}"
+    by_id = {r["id"]: r for r in lines}
+
+    assert by_id[1]["result"]["protocolVersion"] == PROTOCOL_VERSION
+    assert by_id[1]["result"]["serverInfo"]["name"] == "fincheck-mcp"
+    assert set(t["name"] for t in by_id[2]["result"]["tools"]) == set(TOOLS)
+    assert by_id[3]["result"]["isError"] is False
+    assert "metrics" in json.loads(by_id[3]["result"]["content"][0]["text"])
+    assert by_id[4]["result"]["resources"]
+    assert by_id[5]["error"]["code"] == -32601
+
