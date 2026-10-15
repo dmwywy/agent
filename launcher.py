@@ -2,7 +2,7 @@
 """交互式启动器：环境自检 → 选择命令行 / 网页 → 检查 DeepSeek 配置 → 输入材料文件夹 → 运行。
 
 入口（二选一）：
-    双击仓库根目录的 `一键复现.bat`
+    双击仓库根目录的 `run.bat`
     或在项目根目录执行：python launcher.py
 """
 from __future__ import annotations

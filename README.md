@@ -471,7 +471,7 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     ├── test.py               最小调用测试
     ├── testcontract.py       契约自检
     ├── test_tasks.py         任务 / 提示词 / 校验 / MCP 协议测试
-    ├── 一键复现.bat          双击入口（薄包装，仅调用 launcher.py）
+    ├── run.bat              双击入口（薄包装，仅调用 launcher.py）
     ├── launcher.py           交互式启动器：环境自检 → 选命令行/网页 → 填 Key → 选材料 → 运行
     ├── fincheck/
     │   └── __main__.py       CLI 入口：run / ingest / report 与运行摘要
