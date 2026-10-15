@@ -3,7 +3,7 @@
 
 入口（二选一）：
     双击仓库根目录的 `一键复现.bat`
-    或在项目根目录执行：python 启动器.py
+    或在项目根目录执行：python launcher.py
 """
 from __future__ import annotations
 

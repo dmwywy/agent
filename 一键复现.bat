@@ -13,5 +13,5 @@ if errorlevel 1 (
   exit /b 1
 )
 
-python Æô¶¯Æ÷.py
+python launcher.py
 pause
