@@ -119,11 +119,18 @@ run_id = st.sidebar.selectbox(
 st.sidebar.caption("运行编号 = 一次核查的目录名（含上传件、提取字段、核查结果、报告）。")
 
 base = ROOT / "runs" / run_id
+# ★ 读产物前先做新鲜度检查：产物由**旧版代码**产出时（服务进程常驻内存、改了代码没
+#   重启），用当前代码重算确定性部分，避免页面把已经修好的结论按旧的再显示一遍。
+from src.refresh import ensure_fresh
+_fresh = ensure_fresh(run_id)
 manifest = _read(base / "manifest.json", {}) or {}
 results = (_read(base / "rules" / "results.json", {}) or {}).get("results", [])
 csi = _read(base / "rules" / "csi.json", {}) or {}
 research = _read(base / "rules" / "research_claims.json", {}) or {}
 mappings = (_read(base / "llm" / "mappings.json", {}) or {}).get("mappings", [])
+# 语义审计结论（RC06）：模型提示的疑似问题，独立存放、不计入异常口径
+from src.semantic_audit import load_findings
+llm_audit = load_findings(run_id)
 # 模型解释单独存放（结果文件保持纯确定性），按编号关联回来展示
 _expl = {i.get("claim_id") or i.get("rule_id"): (i.get("explanation") or {})
          for i in (_read(base / "rules" / "explanations.json", {}) or {}).get("items", [])}
@@ -162,6 +169,18 @@ if _csi_caveat_text:
 st.caption("指标卡读的是**左侧选中的历史运行**的统计，与上传表单里是否勾选离线无关。"
            "「模型调用」= 在线（api_ok，真实请求成功）/ 缓存（cache_hit，命中本地缓存）。"
            "离线运行、或该次全部命中缓存时，都会显示为 0 在线。")
+
+# 代码版本提示：产物由旧版代码产出时必须显著告警，否则"改了代码结论没变"会被误读成
+# 系统没有修正能力（实测踩过：C研 方向规则已修好，页面仍显示旧结论）。
+if _fresh.get("stale"):
+    if _fresh.get("recomputed"):
+        st.warning("⚠ 本次运行的落盘产物由**非当前版本**的源码产出（通常是服务进程未重启）。"
+                   "已用当前代码重算研报引用核查结论，页面与报告显示的是重算后的结果；"
+                   "建议重启服务后重跑本批材料，以获得完全一致的产物。")
+    else:
+        st.error("⚠ 本次运行的落盘产物由**非当前版本**的源码产出（通常是服务进程未重启），"
+                 "且缺少可复算的中间产物，页面显示的研报引用结论可能落后于当前代码。"
+                 "请重启服务后重新上传材料运行。")
 
 # 未识别 / 处理失败的文件必须显式提示：否则用户以为它已经被核查过了
 _ingest_log = _read(base / "ingest_log.json", []) or []
@@ -230,6 +249,21 @@ with tab1:
             "研报原句": (x.get("evidence") or {}).get("sentence") or "—",
             "位置": loc_str(x.get("evidence")),
         } for x in rv]), width='stretch', hide_index=True)
+
+    # 模型语义审计提示（RC06）：程序规则覆盖不到的语义型问题，由模型不限类型地指出。
+    # ★ 与上方异常分开呈现：这些结论不可复现，是"提示"而非"判定"，不计入异常口径。
+    if llm_audit:
+        st.subheader(f"模型语义审计提示（{len(llm_audit)} 条，不计入异常计数）")
+        st.caption("由大模型对研报原文做不限类型的自由审计后给出，用于补足确定性规则覆盖"
+                   "不到的语义型问题（同比方向、期间语义、单位量级、研报内部预测表勾稽等）。"
+                   "程序只校验了它引用的原句真实存在，未对结论做数值判定，需人工确认。")
+        st.dataframe(pd.DataFrame([{
+            "问题类型": x.get("problem_type") or "—", "归因": x.get("cause") or "—",
+            "研报原句": (x.get("evidence") or {}).get("quote")
+                        or (x.get("evidence") or {}).get("sentence") or "—",
+            "位置": loc_str(x.get("evidence")),
+            "模型说明": x.get("reason", ""), "提示应为": x.get("expected_value") or "—",
+        } for x in llm_audit]), width='stretch', hide_index=True)
 
 # ---- ② 一致性指标 ----
 with tab2:

@@ -37,6 +37,41 @@ def build_explain_anomaly(rule_id: str, diff_desc: str, chunk_id: str,
         "candidates": candidates,      # ["UNIT_SCALE","PERIOD_MISMATCH","SCOPE_MIXED","..."]
     }
 
+# ---------- 语义审计：给模型足够空间，自由指出程序规则覆盖不到的问题 ----------
+MAX_AUDIT_CLAIMS = 20        # 单批最多送多少条 claim（与 match_claim 同量级，便于控成本）
+MAX_AUDIT_FINDINGS = 40      # 最多带多少条程序结论供模型避重
+
+
+def build_audit_claims(claims: list[dict], program_findings: list[dict],
+                       fields: list[dict]) -> dict:
+    """语义审计输入：研报原句 + 程序已给出的结论 + 可比对指标清单。
+
+    三部分都不含"程序不知道的数值"：
+      - claims 是研报原文（程序本就持有），带页码/段号，供模型给出可复核的位置；
+      - program_findings 是程序自己的结论（含 status/cause/reason），只为让模型"别重复报
+        已经判过的同一处问题"，不作为它判断的依据；
+      - fields 只给科目与期间（与 match_claim 同一约束，见 interfaces.md §5.1）。
+    模型可以自由描述问题类型与"应该是多少"，但这些文字**不参与任何计算**：
+    程序只用它把疑似问题列进「待人工复核」，绝不据此改写报表数字。
+    """
+    safe_claims = [{
+        "claim_id": c.get("claim_id"),
+        "sentence": str(c.get("sentence") or "")[:500],
+        "page": c.get("page"),
+        "para_no": c.get("para_no"),
+    } for c in claims[:MAX_AUDIT_CLAIMS]]
+    safe_prog = [{
+        "claim_id": f.get("claim_id"),
+        "rule_id": f.get("rule_id"),
+        "status": f.get("status"),
+        "cause": f.get("cause") or "",
+        "reason": str(f.get("reason") or "")[:120],
+        "truth": str((f.get("right") or {}).get("value") or ""),
+    } for f in program_findings[:MAX_AUDIT_FINDINGS]]
+    return {"task": "audit_claims", "claims": safe_claims,
+            "program_findings": safe_prog, "fields": fields[:MAX_ITEMS]}
+
+
 # ---------- 研报式评价：程序把确定数字喂给模型，模型写分析话，数字白名单校验 ----------
 MAX_COMMENT_METRICS = 24     # 最多喂多少条核心经营指标，控制篇幅与成本
 MAX_COMMENT_ANOMALIES = 20

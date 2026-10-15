@@ -397,6 +397,15 @@ def run(config_path: str, offline: bool = False, run_id: str = "demo",
             sum(1 for r in rc["results"] if r["status"] == "PASS"),
             sum(1 for r in rc["results"] if r["status"] == "FAIL"),
             len(rc["review"]))
+    # 2c. C研 语义审计（RC06，见 src/semantic_audit.py）：把确定性规则覆盖不到的语义型
+    #     问题（同比方向、期间语义、单位量级、研报内部预测表勾稽、单季混用、枚举消歧）
+    #     交给模型不限类型地审一遍。结论一律落「待人工复核」，不升级为异常、不改写数字。
+    s_audit = "SKIPPED"
+    if claims_path and rc is not None:
+        from src.semantic_audit import run_semantic_audit
+        _findings, s_audit = run_semantic_audit(
+            claims_path, rc, run_id, offline, fields=_claim_fields(check_records),
+            api_key=api_key)
     # 3. 规则核查（C内/C间/C期/C附，见 src/rules_engine.py）
     rr = run_rules_engine(records, run_id, offline)
 
@@ -421,9 +430,15 @@ def run(config_path: str, offline: bool = False, run_id: str = "demo",
     manifest["outputs"].update({"match_item_status": s_item,
                                 "match_claim_status": s_claim,
                                 "research_check": s_research,
+                                "semantic_audit": s_audit,
                                 "explain": s_explain,
                                 "commentary": s_comment})
     save_manifest(run_id, manifest)
+    # ★ 落盘本轮源码指纹：报告/网页据此判断产物是否由当前代码产出。
+    #   服务进程常驻内存，改了代码没重启时会继续用旧模块算，产物与代码不一致——
+    #   打上指纹后，读取方才能发现并（见 src/refresh.py）自动重算确定性部分。
+    from src.codefingerprint import write_fingerprint
+    write_fingerprint(run_id)
     return {"run_id": run_id, "match_item": s_item, "match_claim": s_claim,
-            "research_check": s_research, "explain": s_explain,
-            "commentary": s_comment}
+            "research_check": s_research, "semantic_audit": s_audit,
+            "explain": s_explain, "commentary": s_comment}

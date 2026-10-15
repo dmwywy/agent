@@ -19,7 +19,7 @@ def test_temperature_fixed():
 
 
 def test_schema_count_and_export():
-    assert len(SCHEMA_BY_TASK) == 4
+    assert len(SCHEMA_BY_TASK) == 5
     for cls in SCHEMA_BY_TASK.values():
         cls.model_json_schema()
 
@@ -2637,3 +2637,227 @@ def test_summary_flags_unmatched_research_claims_as_review():
     assert "未包含研究报告" not in text
     # 计数口径同步：研报 39 条待复核必须进入网页指标卡的同一个函数
     assert merged_anomaly_counts(model["rule_results"], model["research"])[1] >= 39
+
+
+def test_summary_total_counts_merge_rule_and_research():
+    """核查总评的异常/待复核合计必须合并规则级与研报引用两个来源。
+
+    实测踩过的坑：总评只汇总 rules_per_dim（规则级），研报引用的 5 条不一致被算成 0，
+    首页出现"异常 0 条"而正文并列列出 5 条异常——同一份报告自相矛盾。
+    """
+    from src.pipeline import ROOT
+    from src.report import build_summary, collect, merged_anomaly_counts
+
+    run_id = "pytest_summary_merged_counts"
+    _make_run_fixture(run_id)          # 规则级 1 FAIL、研报引用 1 FAIL + 1 REVIEW
+    try:
+        model = collect(run_id)
+        text = "\n".join(build_summary(model))
+        n_fail, n_review = merged_anomaly_counts(model["rule_results"], model["research"])
+        assert (n_fail, n_review) == (2, 1), "夹具口径：规则级 1 FAIL + 研报引用 1 FAIL、1 REVIEW"
+        assert "核查总评：异常合计 2 条（规则级 1 条 + 研报引用 1 条）" in text
+        assert "待人工复核合计 1 条（规则级 0 条 + 研报引用 1 条）" in text
+        # 不得再出现只看规则级的旧口径（规则级异常单独陈述时才有 1 条）
+        assert "异常合计 0 条" not in text
+        assert "建议优先人工核对上述 2 条异常" in text
+    finally:
+        import shutil
+        shutil.rmtree(ROOT / "runs" / run_id, ignore_errors=True)
+
+
+def test_report_shows_llm_audit_section():
+    """模型语义审计提示必须出现在三种报告里，且**不计入**异常/待复核计数。
+
+    为什么单列：模型结论不可复现，性质是"提示"而非"判定"。混进异常口径会让计数
+    随模型波动，评审无法复算；但只写在日志里又等于没写，报告上看不到。
+    """
+    from openpyxl import load_workbook
+    from src.pipeline import ROOT
+    from src.report import build_all, collect, merged_anomaly_counts
+
+    run_id = "pytest_report_llm_audit"
+    _make_run_fixture(run_id)
+    base = ROOT / "runs" / run_id
+    (base / "llm").mkdir(parents=True, exist_ok=True)
+    (base / "llm" / "audit_findings.json").write_text(json.dumps({
+        "run_id": run_id, "audited_claims": 3, "findings": [{
+            "rule_id": "RC06@v1.0", "dimension": "C研", "claim_id": "c9",
+            "status": "REVIEW", "source": "llm_audit", "cause": "SIGN_ERROR",
+            "problem_type": "同比方向写反", "severity": "HIGH",
+            "expected_value": "应为 -1.2%", "reason": "模型语义审计提示：同比方向写反",
+            "evidence": {"file": "b.docx", "sentence": "营业总收入同比+1.2%",
+                         "quote": "同比+1.2%", "page": 4, "para_no": 7,
+                         "verified": True}}]}, ensure_ascii=False), encoding="utf-8")
+
+    try:
+        model = collect(run_id)
+        # ★ 审计条目不得进入异常/待复核口径（口径与夹具原值一致）
+        assert merged_anomaly_counts(model["rule_results"], model["research"]) == (2, 1)
+        summary = "\n".join(model["summary"])
+        assert "语义审计补充" in summary and "1 处" in summary
+
+        made = build_all(run_id, ("html", "xlsx", "pdf"))
+        html = (ROOT / made["html"]).read_text(encoding="utf-8")
+        assert "模型语义审计提示" in html and "同比方向写反" in html and "同比+1.2%" in html
+        wb = load_workbook(ROOT / made["xlsx"])
+        assert "语义审计提示" in wb.sheetnames
+        with __import__("pdfplumber").open(ROOT / made["pdf"]) as pdf:
+            text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+        assert "模型语义审计提示" in text and "同比方向写反" in text
+    finally:
+        import shutil
+        shutil.rmtree(ROOT / "runs" / run_id, ignore_errors=True)
+
+
+def test_semantic_audit_merges_without_touching_rule_findings():
+    """语义审计合并：程序已判过的 (claim_id, cause) 不重复报，其它一律转待复核。
+
+    实测的漏报根因同源：一句话可以同时有单位错与方向错，按 claim 整条排除会把
+    第二类错误丢掉。故去重键必须是 (claim_id, cause)，不同原因一律各自保留。
+    """
+    from src.semantic_audit import _finding_record, _program_keys
+
+    rc = {"results": [{"claim_id": "c1", "cause": "UNIT_SCALE", "status": "FAIL"},
+                      {"claim_id": "c2", "cause": "", "status": "FAIL"}],
+          "review": [{"claim_id": "c3", "reason": "模型未返回该条的匹配结果"}]}
+    keys = _program_keys(rc)
+    assert ("c1", "UNIT_SCALE") in keys
+    assert ("c2", "UNCERTAIN") in keys      # 无 cause 的按兜底原因计
+    assert ("c3", "UNCERTAIN") in keys      # REVIEW 条目同理
+    assert ("c1", "SIGN_ERROR") not in keys, "同一 claim 的另一类错误必须仍可被报出"
+
+    rec = _finding_record({"claim_id": "c1", "cause": "SIGN_ERROR",
+                           "problem_type": "同比方向写反", "severity": "HIGH",
+                           "expected_value": "应为 -1.2%", "reason": "方向相反",
+                           "evidence_quote": "同比+1.2%"},
+                          {"claim_id": "c1", "sentence": "营业总收入同比+1.2%",
+                           "page": 4, "para_no": 2}, "RC06@v1.0")
+    assert rec["status"] == "REVIEW" and rec["source"] == "llm_audit"
+    assert rec["evidence"]["quote"] == "同比+1.2%" and rec["evidence"]["page"] == 4
+
+
+def test_semantic_audit_validation_blocks_fabricated_evidence():
+    """evidence_quote 不在原句里（编造）时必须被拦下——报告不能出现无法复核的条目。"""
+    from src.tasks import ALLOWED_CAUSES, _check_audit_findings
+
+    ctx = {"audit_claims": {"c1": "公司营业总收入同比+1.2%"}, "causes": ALLOWED_CAUSES}
+    ok = {"findings": [{"claim_id": "c1", "cause": "SIGN_ERROR",
+                        "evidence_quote": "同比+1.2%"}]}
+    assert _check_audit_findings(ok, ctx) == []
+    bad_quote = {"findings": [{"claim_id": "c1", "cause": "SIGN_ERROR",
+                               "evidence_quote": "同比-1.2%"}]}
+    assert _check_audit_findings(bad_quote, ctx)
+    unknown = {"findings": [{"claim_id": "cX", "cause": "SIGN_ERROR",
+                             "evidence_quote": "同比+1.2%"}]}
+    assert _check_audit_findings(unknown, ctx)
+    bad_cause = {"findings": [{"claim_id": "c1", "cause": "MADE_UP",
+                               "evidence_quote": "同比+1.2%"}]}
+    assert _check_audit_findings(bad_cause, ctx)
+
+
+def test_stale_products_are_recomputed_with_current_code():
+    """产物由旧版代码产出时，必须用当前代码重算 C研 结论。
+
+    这正是"改了代码但报告里还是没有那个异常"的根因：网页端在同进程内 import
+    src.pipeline / src.research_check，模块常驻内存，服务没重启就仍用旧逻辑算。
+    指纹不符 → 重算 → 报告里就该出现规则能判出来的那条异常。
+    """
+    import shutil
+    from src.codefingerprint import write_fingerprint
+    from src.pipeline import ROOT
+    from src.research_check import run_research_check
+    from src.refresh import ensure_fresh
+
+    run_id = "pytest_stale_refresh"
+    base = ROOT / "runs" / run_id
+    (base / "ingested" / "claims").mkdir(parents=True, exist_ok=True)
+    (base / "llm").mkdir(parents=True, exist_ok=True)
+    # 两年营业总收入：2025 同比真值 = (1012-1000)/1000 ≈ +1.2%
+    (base / "ingested" / "fields.json").write_text(json.dumps([
+        {"item_code": "TOTAL_REVENUE", "item_raw": "营业总收入", "period": "2024",
+         "period_type": "FY", "value": "1000", "page": 9, "raw_text": "营业总收入 1000"},
+        {"item_code": "TOTAL_REVENUE", "item_raw": "营业总收入", "period": "2025",
+         "period_type": "FY", "value": "1012", "page": 9, "raw_text": "营业总收入 1012"},
+    ], ensure_ascii=False), encoding="utf-8")
+    (base / "ingested" / "claims" / "report_claims.json").write_text(json.dumps([
+        {"claim_id": "c1", "kind": "TEXT", "source": "b.docx", "section": "核心观点",
+         "page": 4, "para_no": 2,
+         "sentence": "公司2025年营业总收入1012亿元，同比-1.2%"},
+    ], ensure_ascii=False), encoding="utf-8")
+    (base / "llm" / "claim_matches.json").write_text(json.dumps({
+        "matches": [{"claim_id": "c1", "item_code": "TOTAL_REVENUE", "period": "2025",
+                     "evidence": {"sentence": "公司2025年营业总收入1012亿元，同比-1.2%",
+                                  "page": 4, "para_no": 2}}],
+        "review": []}, ensure_ascii=False), encoding="utf-8")
+    try:
+        # 旧产物：先按"另一份代码"的指纹落盘（这里手动写一个不存在的指纹）
+        (base / "rules").mkdir(parents=True, exist_ok=True)
+        (base / "rules" / "research_claims.json").write_text(
+            json.dumps({"results": [], "review": []}), encoding="utf-8")
+        fp = base / "code_fingerprint.json"
+        fp.write_text(json.dumps({"fingerprint": "0" * 64, "files": []}), encoding="utf-8")
+
+        res = ensure_fresh(run_id)
+        assert res == {"stale": True, "recomputed": True}
+        after = json.loads((base / "rules" / "research_claims.json").read_text(encoding="utf-8"))
+        fails = [(r.get("rule_id"), r.get("cause"))
+                 for r in after["results"] if r.get("status") == "FAIL"]
+        assert ("RC02@v1.0", "SIGN_ERROR") in fails, \
+            "重算后必须报出「同比方向与财报口径相反」这条异常"
+
+        # 再跑一次：指纹已更新为当前代码 → 不再视为陈旧、不再重算
+        write_fingerprint(run_id)
+        assert ensure_fresh(run_id) == {"stale": False, "recomputed": False}
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_legacy_products_without_fingerprint_are_recomputed():
+    """改动之前跑的旧运行没有指纹文件，也必须自愈。
+
+    使用者打开的多半是"改动前那一轮"的报告，投诉「代码改了这里还是没显示异常」。
+    旧产物没有指纹（无法判断版本），但只要它确实做过 C研 比对，就用当前代码重算，
+    让报告显示与当前代码一致的结论——这正是修复"比率正负号看不见"的最后一环。
+    """
+    import shutil
+    from src.pipeline import ROOT
+    from src.refresh import ensure_fresh
+
+    run_id = "pytest_legacy_refresh"
+    base = ROOT / "runs" / run_id
+    (base / "ingested" / "claims").mkdir(parents=True, exist_ok=True)
+    (base / "llm").mkdir(parents=True, exist_ok=True)
+    (base / "rules").mkdir(parents=True, exist_ok=True)
+    (base / "ingested" / "fields.json").write_text(json.dumps([
+        {"item_code": "TOTAL_REVENUE", "item_raw": "营业总收入", "period": "2024",
+         "period_type": "FY", "value": "1000", "page": 9, "raw_text": "营业总收入 1000"},
+        {"item_code": "TOTAL_REVENUE", "item_raw": "营业总收入", "period": "2025",
+         "period_type": "FY", "value": "1012", "page": 9, "raw_text": "营业总收入 1012"},
+    ], ensure_ascii=False), encoding="utf-8")
+    (base / "ingested" / "claims" / "report_claims.json").write_text(json.dumps([
+        {"claim_id": "c1", "kind": "TEXT", "source": "b.docx", "section": "核心观点",
+         "page": 4, "para_no": 2,
+         "sentence": "公司2025年营业总收入1012亿元，同比-1.2%"},
+    ], ensure_ascii=False), encoding="utf-8")
+    (base / "llm" / "claim_matches.json").write_text(json.dumps({
+        "matches": [{"claim_id": "c1", "item_code": "TOTAL_REVENUE", "period": "2025",
+                     "evidence": {"sentence": "公司2025年营业总收入1012亿元，同比-1.2%",
+                                  "page": 4, "para_no": 2}}],
+        "review": []}, ensure_ascii=False), encoding="utf-8")
+    (base / "rules" / "research_claims.json").write_text(
+        json.dumps({"results": [], "review": []}), encoding="utf-8")
+    try:
+        # 关键：不写 code_fingerprint.json —— 模拟"本次改动之前跑的旧运行"
+        assert not (base / "code_fingerprint.json").exists()
+        res = ensure_fresh(run_id)
+        assert res == {"stale": True, "recomputed": True}
+        after = json.loads((base / "rules" / "research_claims.json").read_text(encoding="utf-8"))
+        fails = [(r.get("rule_id"), r.get("cause"))
+                 for r in after["results"] if r.get("status") == "FAIL"]
+        assert ("RC02@v1.0", "SIGN_ERROR") in fails, \
+            "旧产物无指纹时也必须自愈，报出「同比方向与财报口径相反」"
+        # 自愈后写入指纹 → 下一次读取不再重复重算
+        assert ensure_fresh(run_id) == {"stale": False, "recomputed": False}
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+

@@ -226,6 +226,11 @@ def _read(p: Path, default=None):
 
 def collect(run_id: str) -> dict:
     """把一次运行的全部产物汇总成报告模型。缺哪份产物就少哪一节，不报错。"""
+    # ★ 先做新鲜度检查，再读产物：产物由**旧版代码**产出时（服务进程常驻内存，
+    #   改了代码没重启就会这样），用当前代码重算确定性部分。必须在读文件之前做，
+    #   否则报告会把"已经修好的结论"按旧的再写一遍。
+    from src.refresh import ensure_fresh
+    fresh = ensure_fresh(run_id)
     base = ROOT / "runs" / run_id
     manifest = _read(base / "manifest.json", {}) or {}
     results = _read(base / "rules" / "results.json", {}) or {}
@@ -233,6 +238,10 @@ def collect(run_id: str) -> dict:
     research = _read(base / "rules" / "research_claims.json", {}) or {}
     mappings = _read(base / "llm" / "mappings.json", {}) or {}
     commentary = _read(base / "llm" / "commentary.json", {}) or {}
+    # 语义审计结论（RC06）：模型提示的"程序规则覆盖不到"的疑似问题，单独存放，
+    # 不与确定性结果混在一个文件里。旧产物没有该文件时为空列表。
+    from src.semantic_audit import load_findings
+    llm_audit = load_findings(run_id)
     # 材料识别日志：哪些文件被当成什么处理、哪些没被识别，必须能呈现在报告上
     ingest_log = _read(base / "ingest_log.json", []) or []
 
@@ -277,6 +286,9 @@ def collect(run_id: str) -> dict:
         "fields": fields,
         "commentary": commentary,
         "ingest_log": ingest_log,
+        "llm_audit": llm_audit,
+        "code_stale": bool(fresh.get("stale")),
+        "code_refreshed": bool(fresh.get("recomputed")),
         "counts": _counts(rule_results, research),
     }
     # 成段结论：由已完成聚合的计数与比对结果生成，供三种报告共用同一份文案
@@ -398,6 +410,24 @@ def research_review_reasons(model: dict) -> list[str]:
     return [f"{reason}：{n} 条" for reason, n in c.most_common()]
 
 
+def audit_rows(model: dict) -> list[list[str]]:
+    """模型语义审计提示的表格行：(问题类型, 归因, 研报原句, 位置, 模型说明, 提示应为)。
+
+    ★ evidence.quote 是模型逐字引用的原句片段（已由程序校验其确实存在于原句）；
+      缺失时退回整句。位置列复用 loc_str，与其它明细行同一口径（页码 + 段号）。
+    """
+    rows: list[list[str]] = []
+    for x in model.get("llm_audit") or []:
+        ev = x.get("evidence") or {}
+        rows.append([x.get("problem_type") or "—",
+                     x.get("cause") or "—",
+                     ev.get("quote") or _review_sentence(x),
+                     loc_str(ev),
+                     x.get("reason") or "",
+                     x.get("expected_value") or "—"])
+    return rows
+
+
 def ingest_notes(model: dict) -> list[str]:
     """材料识别结果的事实陈述：**未识别的文件必须显式列出**，不得静默丢弃。
 
@@ -435,9 +465,16 @@ def build_summary(model: dict) -> list[str]:
     ★ 只陈述 model 里已经存在的数字（counts / csi / manifest / fields），
       不新做任何计算与猜测：报告不产结论性判断，仅呈现程序侧的事实。
       全部由确定性文本模板生成，离线可复现，不增加模型调用。
+    ★ 「异常 / 待复核」的总数必须用 merged_anomaly_counts 这一唯一口径（规则级 + 研报
+      引用），不得只汇总 rules_per_dim：研报引用的不一致条目落在 research_claims.json，
+      只算规则级会让首页出现"异常 0 条"而正文列出 5 条异常的自相矛盾。
     """
     c = model.get("counts") or {}
     applicable, passed, failed, review, na = _dim_counts(c)
+    rc_fail = c.get("research_fail", 0)
+    rc_review = c.get("research_review", 0)
+    total_fail, total_review = merged_anomaly_counts(model.get("rule_results") or [],
+                                                     model.get("research") or {})
     paras = [f"本次核查共提取结构化字段 {len(model.get('fields') or [])} 条，"
              f"执行规则 {c.get('rules_total', 0)} 条，其中可执行 {applicable} 条、"
              f"通过 {passed} 条、异常 {failed} 条、待人工复核 {review} 条、不适用 {na} 条。"]
@@ -454,19 +491,41 @@ def build_summary(model: dict) -> list[str]:
     if rc:
         paras.append(f"研报引用核查共比对 {len(rc)} 条："
                      f"一致 {sum(1 for r in rc if r.get('status') == 'PASS')} 条、"
-                     f"不一致 {sum(1 for r in rc if r.get('status') == 'FAIL')} 条、"
-                     f"待人工复核 {len((model.get('research') or {}).get('review') or [])} 条。")
+                     f"不一致 {rc_fail} 条、待人工复核 {rc_review} 条。")
     else:
-        n_rv = len((model.get("research") or {}).get("review") or [])
-        if n_rv:
+        if rc_review:
             # ★ 有引用却一条都没能自动比对（离线缓存未命中、模型漏答）：不能说
             #   "未包含研究报告"，那是误导——必须如实标注这批引用转了人工复核。
-            paras.append(f"研报引用核查本次未完成自动比对：{n_rv} 条引用全部转人工复核"
+            paras.append(f"研报引用核查本次未完成自动比对：{rc_review} 条引用全部转人工复核"
                          f"（模型未给出可用的科目/期间匹配，常见于离线运行或缓存未命中），"
                          f"研报引用维度本轮不参与 CSI 评分。")
         else:
             paras.append("本批材料未包含研究报告，或研报引用未匹配到可比字段："
                          "研报引用维度不适用。")
+
+    # ★ 合并口径的核查总评：这是读者唯一应据以判断"本次查到多少问题"的数字，
+    #   必须显式拆出两个来源，避免把研报引用的不一致当成"没有异常"。
+    paras.append(f"核查总评：异常合计 {total_fail} 条（规则级 {failed} 条 + 研报引用 "
+                 f"{rc_fail} 条）、待人工复核合计 {total_review} 条（规则级 {review} 条 + "
+                 f"研报引用 {rc_review} 条）。")
+
+    audit = model.get("llm_audit") or []
+    if audit:
+        # 语义审计条目**不计入上面的异常/待复核口径**：它们是模型提示、不可复现，
+        # 与程序判定的异常性质不同，混在一起会让计数失去可复现性。
+        paras.append(f"语义审计补充：模型对研报原文做了一遍不限类型的自由审计，"
+                     f"另提示 {len(audit)} 处程序规则未覆盖的疑似问题"
+                     f"（见「模型语义审计提示」一节），"
+                     f"均需人工确认，不计入上述异常与待复核口径。")
+
+    if model.get("code_stale"):
+        # ★ 代码指纹不符意味着磁盘产物由旧版代码产出。这解释"改了代码但结论没变"，
+        #   必须比 CSI 更醒目地写在总评里，否则评审会以为系统没有修正能力。
+        note = ("已用当前代码重算研报引用核查结论。" if model.get("code_refreshed")
+                else "重算未执行（缺少可复算的中间产物），下列研报引用结论可能落后于当前代码。")
+        paras.append(f"⚠ 版本提示：本次运行的落盘产物由**非当前版本**的源码产出"
+                     f"（通常是服务进程未重启、仍加载旧模块）。{note}"
+                     f"请重启服务后重跑本批材料，以获得与当前代码一致的结论。")
 
     csi = model.get("csi") or {}
     if csi.get("csi") is not None:
@@ -476,12 +535,26 @@ def build_summary(model: dict) -> list[str]:
         paras.append("本次运行没有可执行的规则，未计算 CSI。")
 
     advice = []
-    if failed:
-        advice.append(f"建议优先人工核对上述 {failed} 条异常，回到原始披露确认差异是否属于"
-                      f"列报口径、会计政策变更或四舍五入。")
-    if review:
-        advice.append(f"另有 {review} 条标记为待人工复核，程序无法自动判定，不代表存在错误。")
-    if not failed and not review:
+    if total_fail:
+        detail = []
+        if failed:
+            detail.append(f"规则级 {failed} 条")
+        if rc_fail:
+            detail.append(f"研报引用 {rc_fail} 条")
+        advice.append(f"建议优先人工核对上述 {total_fail} 条异常"
+                      f"（{'、'.join(detail)}），回到原始披露确认差异是否属于列报口径、"
+                      f"会计政策变更或四舍五入。")
+    if total_review:
+        detail = []
+        if review:
+            detail.append(f"规则级 {review} 条")
+        if rc_review:
+            detail.append(f"研报引用 {rc_review} 条")
+        advice.append(f"另有 {total_review} 条标记为待人工复核（{'、'.join(detail)}），"
+                      f"程序无法自动判定，不代表存在错误。")
+    if audit:
+        advice.append(f"模型语义审计另有 {len(audit)} 处疑似提示，请一并人工确认。")
+    if not total_fail and not total_review and not audit:
         advice.append("报告期内没有需要人工介入的条目；可结合分部与附注披露做进一步复核。")
     calls = (model.get("manifest") or {}).get("calls") or {}
     if calls.get("cache_miss") or calls.get("failed"):
@@ -700,6 +773,21 @@ def render_pdf(model: dict, path: Path) -> Path:
             rows.extend(_rv_rows)
             story.append(tbl(rows, widths=[20 * mm, 16 * mm, 52 * mm, 46 * mm, 31 * mm]))
             story.append(Spacer(1, 5))
+
+    # 模型语义审计提示（RC06）：程序规则覆盖不到的语义型问题，由模型不限类型地指出。
+    # ★ 与"异常"分开呈现：这些结论不可复现，性质是"提示"而非"判定"，需人工确认。
+    _au_rows = audit_rows(model)
+    if _au_rows:
+        story.append(Paragraph("模型语义审计提示（不计入异常计数，需人工确认）", h2))
+        story.append(Paragraph(
+            "以下条目由大模型对研报原文做不限类型的自由审计后给出，用于补足确定性规则"
+            "覆盖不到的语义型问题（同比方向、期间语义、单位量级、研报内部预测表勾稽等）。"
+            "程序只校验了它引用的原句真实存在，未对结论做数值判定，故单列于此、"
+            "不计入「异常 / 待人工复核」口径。", small))
+        rows = [["问题类型", "归因", "研报原句", "位置", "模型说明", "提示应为"]]
+        rows.extend(_au_rows)
+        story.append(tbl(rows, widths=[24 * mm, 16 * mm, 40 * mm, 26 * mm, 45 * mm, 20 * mm]))
+        story.append(Spacer(1, 5))
 
     # 研报观点 vs 财报数字：成段点评（有研报比对结果时才出现）
     review = model.get("research_review") or []
@@ -949,6 +1037,13 @@ def render_xlsx(model: dict, path: Path) -> Path:
               loc_str(x.get("evidence"))]
              for x in (model.get("research") or {}).get("review", [])])
 
+    # 语义审计提示（RC06）：模型自由审计给出的、程序规则覆盖不到的疑似问题。
+    # ★ 独立成表而非并入「待人工复核」：它不计入异常口径，混进去会让计数不可复现。
+    _au_rows = audit_rows(model)
+    if _au_rows:
+        sheet("语义审计提示", ["问题类型", "归因", "研报原句", "位置", "模型说明", "提示应为"],
+              _au_rows)
+
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
     return path
@@ -1078,6 +1173,17 @@ def render_html(model: dict, path: Path) -> Path:
                             f'（程序无法自动判定，不代表存在错误）：'
                             f'{_esc("；".join(research_review_reasons(model)))}</p>')
             sections.append(_table(["科目", "期间", "原因", "研报原句", "位置"], _rv_rows))
+
+    # 模型语义审计提示（RC06）：与"异常"分开呈现，性质是提示而非判定
+    _au_rows = audit_rows(model)
+    if _au_rows:
+        sections.append("<h2>模型语义审计提示（不计入异常计数，需人工确认）</h2>")
+        sections.append('<p class="meta">以下条目由大模型对研报原文做不限类型的自由审计后给出，'
+                        '用于补足确定性规则覆盖不到的语义型问题（同比方向、期间语义、'
+                        '单位量级、研报内部预测表勾稽等）。程序只校验了它引用的原句真实存在，'
+                        '未对结论做数值判定，故单列于此、不计入「异常 / 待人工复核」口径。</p>')
+        sections.append(_table(["问题类型", "归因", "研报原句", "位置", "模型说明", "提示应为"],
+                               _au_rows))
 
     # 研报观点 vs 财报数字：成段点评（有研报比对结果时才出现）
     review = model.get("research_review") or []

@@ -24,6 +24,31 @@ ALLOWED_CAUSES = {"UNIT_SCALE", "PERIOD_MISMATCH", "SCOPE_MIXED",
 PROGRAM_EVIDENCE_TASKS = {"match_item", "match_claim"}
 
 
+def _check_audit_findings(data: dict, context: dict) -> list[str]:
+    """语义审计输出校验：claim 必须来自本次输入，evidence_quote 必须**逐字**在原句中。
+
+    ★ 不做"数值正确性"校验——审计的价值恰恰在于发现规则覆盖不到的问题，用程序去验
+      它的结论等于把它降级成又一条规则。但"引用的原句是否真实存在"是可验证的客观事实，
+      必须验：编造证据的结论一律拦下，否则报告里会出现无法复核的伪条目。
+    """
+    errs: list[str] = []
+    sents = context.get("audit_claims") or {}
+    allowed = context.get("causes") or set()
+    for f in data.get("findings") or []:
+        cid = f.get("claim_id")
+        if cid not in sents:
+            errs.append(f"claim_id 不在本次输入中（疑似编造）：{cid}")
+            continue
+        if f.get("cause") and allowed and f["cause"] not in allowed:
+            errs.append(f"cause 越界：{f['cause']}")
+        quote = (f.get("evidence_quote") or "").strip()
+        if not quote:
+            errs.append(f"{cid} 的 evidence_quote 为空：必须逐字引用研报原句作为依据")
+        elif quote not in sents[cid]:
+            errs.append(f"{cid} 的 evidence_quote 不是原句片段（疑似编造）：{quote[:40]}")
+    return errs
+
+
 def load_item_codes() -> set[str]:
     """从 rules/fields.yaml 读出标准科目编号，作为模型 item_code / canonical_item 的合法取值。"""
     with FIELDS_YAML.open(encoding="utf-8") as f:
@@ -69,6 +94,8 @@ def _post_checks(data: dict, task: str, context: dict | None) -> list[str]:
             errs += check_no_amounts(data.get("text", ""), ctx["allowed_numbers"])
         # 小节名白名单：拦越界小节名 + 必含【核心观点】；其余小节不强制齐备
         errs += check_commentary_sections(data.get("text", ""))
+    if task == "audit_claims":
+        errs += _check_audit_findings(data, {**ctx, "causes": ALLOWED_CAUSES})
     return errs
 
 

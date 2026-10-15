@@ -49,9 +49,34 @@ class ReportTextOut(BaseModel):
     ok: bool
     text: str
 
+
+class AuditFinding(BaseModel):
+    """语义审计的一条结论：模型指出"这句话在什么地方不自洽"。
+
+    ★ 允许模型写 problem_type / expected_value 这类**自由文本**，因为"比率正负号写反"
+      「预测年份指向已结束年度」这类问题无法被确定性规则穷举——必须给模型足够空间表达。
+      但它**不产出用于计算的数值**：expected_value 只是提示文案，程序绝不据此改写任何
+      数字，也不会把它升级成"异常"。命中的条目一律落「待人工复核（模型语义审计提示）」。
+    """
+    claim_id: str
+    problem_type: str = Field(default="", max_length=60)
+    cause: str = Field(default="", max_length=32)
+    severity: str = Field(default="MED", max_length=8)
+    evidence_quote: str = Field(default="", max_length=300)
+    expected_value: str = Field(default="", max_length=120)
+    reason: str = Field(default="", max_length=300)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+
+
+class AuditOut(BaseModel):
+    ok: bool = True
+    findings: list[AuditFinding] = []
+
+
 SCHEMA_BY_TASK = {
     "match_item":      MatchItemOut,
     "match_claim":     MatchClaimOut,
     "explain_anomaly": ExplainOut,
     "gen_commentary":  ReportTextOut,   # 研报式评价：允许引用程序喂的确定数字，白名单校验
+    "audit_claims":    AuditOut,        # 语义审计：不限错误类型的自由审计，结论转人工复核
 }
