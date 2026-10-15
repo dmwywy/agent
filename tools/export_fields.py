@@ -5,7 +5,8 @@
 本工具从 `rules/fields.yaml`（程序侧唯一真源）直接生成，保证交付件与代码一致。
 
 用法：
-    python tools/export_fields.py            # 输出到 docs/field_mapping_v1.md
+    python tools/export_fields.py            # 输出到当前目录 field_mapping_v1.md
+    python tools/export_fields.py --out <路径>  # 指定输出文件
     python tools/export_fields.py --print    # 只打印，不写文件
 """
 import argparse
@@ -55,7 +56,7 @@ def render(rows: list[dict], version: str) -> str:
         f"> **版本**：{version} ｜ **真源**：`rules/fields.yaml` ｜ **本文件由 "
         f"`tools/export_fields.py` 生成，请勿手工编辑**",
         ">",
-        "> 字段名、类型、枚举取值若需变更，须先改 `docs/interfaces.md` 并升版本号（§1.4），"
+        "> 字段名、类型、枚举取值若需变更，须先改 `接口契约（interfaces.md）` 并升版本号（§1.4），"
         "再改 `rules/fields.yaml`，然后重新生成本文件。",
         "",
         f"共 **{len(rows)}** 个字段，其中核心字段（`core: true`）"
@@ -99,7 +100,7 @@ def render(rows: list[dict], version: str) -> str:
         "本表为**程序侧**字段编号（`rules/fields.yaml` 的 `item_code`）。",
         "附件中的「项目字段」列使用 `BS-06`/`IS-01` 一类编号，其字典来源未在附件中给出，",
         "故本表**保留该列空缺**，不自造对应关系。请对端提供该字典后由其映射，",
-        "或在确认后写入 `docs/interfaces.md §6` 统一维护。",
+        "或在确认后写入 `接口契约（interfaces.md）§6` 统一维护。",
         "",
         "## 4. 约束（已写入代码断言）",
         "",
@@ -115,7 +116,7 @@ def render(rows: list[dict], version: str) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--print", dest="to_stdout", action="store_true")
-    ap.add_argument("--out", default="docs/field_mapping_v1.md")
+    ap.add_argument("--out", default="field_mapping_v1.md")
     args = ap.parse_args()
 
     docs = yaml.safe_load((ROOT / "rules" / "fields.yaml").read_text(encoding="utf-8"))

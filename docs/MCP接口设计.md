@@ -3,7 +3,7 @@
 > **状态：已实现。** 服务代码位于 [`mcp_server/`](../mcp_server/)（`server.py` + `__main__.py`），
 > 启动方式 `python -m mcp_server`（stdio），离线自检 `python -m mcp_server --selftest`；
 > 客户端接入配置样例见仓库根 [`.mcp.json`](../.mcp.json)。
-> 输入输出沿用 [`docs/interfaces.md`](./interfaces.md) 的 JSON 契约，**不引入任何新契约**。
+> 输入输出沿用既有接口契约（`interfaces.md`，该设计稿随交付包外置）的 JSON 契约，**不引入任何新契约**。
 >
 > 实现选择：用**标准库**实现 stdio JSON-RPC 2.0，**零新增第三方依赖**（评审环境无需安装 `mcp` SDK），
 > 目录名用 `mcp_server/` 而非 `mcp/`，避免同名本地包遮蔽已安装的官方 SDK。

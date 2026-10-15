@@ -306,7 +306,7 @@ Authorization: Bearer ${DEEPSEEK_API_KEY}
 }
 ```
 
-（`fields` 中**只给科目与期间，不给金额**——防止模型越界做数值判断，见 `interfaces.md §5.1`。）
+（`fields` 中**只给科目与期间，不给金额**——防止模型越界做数值判断，见接口契约 §5.1。）
 
 ### 10.2 响应
 
@@ -403,10 +403,10 @@ item status:  CACHE_HIT | mappings: 22
 | `request.max_tokens` | `1500` | **`8000`** | 推理模型默认开启思考，1500 必然正文为空 |
 | `request.auth` | `"Bearer from environment/.env only"` | 变量名 **`DEEPSEEK_API_KEY`** | 官方样例明确 |
 | 请求参数 | 无 `thinking` | **必填 `thinking:{"type":"disabled"}`** | 见 §9.3，否则契约失败 |
-| `response_common.evidence` | `required` | **`match_item` / `match_claim` 不返回 evidence**，由程序回填 | `interfaces.md` v1.1/v1.2 |
+| `response_common.evidence` | `required` | **`match_item` / `match_claim` 不返回 evidence**，由程序回填 | 接口契约 v1.1/v1.2 |
 | `data/mock/offline_mock_input.json` | 含 `evidence_context` | 该字段不属于这两个任务 | 同上 |
 | `data/mock/offline_mock_output.json` | 返回 `evidence` | 不应返回 | 同上 |
-| `data/mock/offline_mock_input.json` | `period: "FY2024"` | 本项目为 `"2024"`（FY）/ `"2024-12-31"`（时点） | `interfaces.md §2.1` |
+| `data/mock/offline_mock_input.json` | `period: "FY2024"` | 本项目为 `"2024"`（FY）/ `"2024-12-31"`（时点） | 接口契约 §2.1 |
 | 响应 `confidence` | `required` | 各任务结构见 `src/schemas.py` | 以 schema 为准 |
 
 **关于 `field_mapping_report.md`**（业务内容，按指示未做修改，仅作事实核对）：

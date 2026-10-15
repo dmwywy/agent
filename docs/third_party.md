@@ -2,7 +2,7 @@
 
 > 用途：逐项说明本仓库用到的第三方组件与商业服务，供交付与合规核对。
 > 数据来源：`requirements.txt`（锁定版本）、`README.md` 第十二节、
-> `docs/model_adapter_contract.md`、`docs/interfaces.md`。
+> `docs/model_adapter_contract.md`。
 > 版本号以 `requirements.txt` 为准，未在环境说明中单列者按该文件锁定值列出。
 
 ---

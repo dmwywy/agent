@@ -155,8 +155,8 @@ macOS / Linux：
 | C附 主表附注 | 2 | NB01 NB02 | 附注七、1 货币资金；附注七、5 应收账款 |
 | C研 研报引用 | 1 | RC01（每条 claim 一例） | 研报原文 vs 财报结构化数据 |
 
-逐条规则的字段需求、容差档位与出处见 `rules/rules.yaml` 注释；字段清单见
-`docs/field_mapping_v1.md`（由 `tools/export_fields.py` 从 `rules/fields.yaml` 生成）。
+逐条规则的字段需求、容差档位与出处见 `rules/rules.yaml` 注释；字段清单真源见
+`rules/fields.yaml`（如需可读版：`python tools/export_fields.py --out <输出路径>`）。
 
 ### 4. 返回结构与证据校验
 
@@ -482,15 +482,11 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     ├── configs/
     │   ├── demo.yaml         运行配置
     │   └── model.yaml        模型与推理参数声明（`src/llm.py` 启动时加载）
-    ├── docs/
-    │   ├── interfaces.md     接口契约
-    │   ├── field_mapping_v1.md  字段清单（由 rules/fields.yaml 导出）
+    ├── docs/                 交付用文档（接口契约、字段字典等设计稿在交付包外）
     │   ├── model_adapter_contract.md  模型接口确认版
     │   ├── third_party.md    第三方依赖与模型清单
     │   ├── MCP接口设计.md    MCP 模块接口设计（已实现）
-    │   ├── 决赛交付与模块映射.md  模块映射与交付说明
-    │   ├── evidence/         验证与演练截图
-    │   └── 内部/             过程草稿与内部文档（不参与交付）
+    │   └── 决赛交付与模块映射.md  模块映射与交付说明
     ├── prompts/              4 个提示词（内容哈希写入 manifest）
     │   ├── match_item.txt    科目归一化
     │   ├── match_claim.txt   研报引用匹配
@@ -612,7 +608,7 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
 1. 主分支只放可运行的版本。
 2. 各人运行产物放入 `runs/<用户名>_<日期>_<用途>/`，互不覆盖。
 3. `runs/demo_baseline/` 为公共基准结果，**修改后需全组同步**。
-4. 字段名、枚举取值、容差档位的变更须先改 `docs/interfaces.md` 并升版本号，再改代码。
+4. 字段名、枚举取值、容差档位的变更须先改 `rules/fields.yaml` 并升版本号，再改代码。
 5. 大数据文件（完整年报、视频）走共享盘，不进入版本库。
 6. 提交前执行 `git status`，确认清单中不含 `.env`、`.venv/`、`runs/<其他 run_id>/`。
 

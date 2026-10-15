@@ -1,7 +1,7 @@
 # src/pipeline.py
 """流程编排：把「解析数据 → 语义提取 → 规则核查 → 量化评分 → 报告」串成可运行闭环。
 
-对接边界（务必与 docs/interfaces.md 保持一致）：
+对接边界（务必与接口契约 interfaces.md 保持一致）：
   - 数字经济A  产出 data/structured/<公司>_<期间>.json（§2.1，含证据三要素 page/chunk_id/raw_text）
   - 信息工程    本模块调度模型侧任务，产出 runs/<run_id>/llm/*（§3.1 / §3.2）
   - 数字经济B  实现 src.rules_engine（金额计算 + 表内勾稽 + 表间比对 + CSI 评分，§4）
@@ -35,7 +35,7 @@ def load_structured(data_dir: str) -> list[dict]:
     if not d.exists():
         raise FileNotFoundError(
             f"解析数据目录不存在：{d}。请数字经济A 先产出结构化数据"
-            f"（格式见 docs/interfaces.md §2.1，缺 page/chunk_id/raw_text 不得进入核查）。")
+            f"（格式见接口契约 §2.1，缺 page/chunk_id/raw_text 不得进入核查）。")
     records = []
     for p in sorted(d.glob("*.json")):
         if p.name == "chunk_index.json":
