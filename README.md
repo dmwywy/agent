@@ -471,7 +471,8 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     ├── test.py               最小调用测试
     ├── testcontract.py       契约自检
     ├── test_tasks.py         任务 / 提示词 / 校验 / MCP 协议测试
-    ├── 一键复现.bat          双击运行：按提示输入材料文件夹，自动跑完自检 → 核查 → 三端报告
+    ├── 一键复现.bat          双击入口（薄包装，仅调用 启动器.py）
+    ├── 启动器.py             交互式启动器：环境自检 → 选命令行/网页 → 填 Key → 选材料 → 运行
     ├── fincheck/
     │   └── __main__.py       CLI 入口：run / ingest / report 与运行摘要
     ├── mcp_server/           MCP 服务（stdio JSON-RPC 2.0，标准库实现，零新增依赖）
