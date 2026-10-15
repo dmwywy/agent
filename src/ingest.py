@@ -19,7 +19,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 SUPPORTED = {".pdf", ".docx", ".docm"}
-ANNUAL_MARKERS = ("合并资产负债表", "合并利润表", "合并现金流量表")
+# 识别依据是内容里的**报表标题**，不是文件名。措辞要容忍"合并/合并及母公司"两种写法：
+# 年报正文写"合并资产负债表"，年度审计报告正文却写"（合并及母公司）资产负债表/
+# 利润表/现金流量表"——后者没有"合并资产负债表"这样连着的字面量，用字面量匹配会
+# 把整份审计报告判成"未识别"而直接跳过。
+ANNUAL_MARKERS = (r"合并(?:及母公司)?资产负债表",
+                  r"合并(?:及母公司)?利润表",
+                  r"合并(?:及母公司)?现金流量表")
 RESEARCH_MARKERS = ("核心观点", "投资评级", "盈利预测", "证券研究报告", "风险提示")
 YEAR_RE = re.compile(r"(20\d{2})")
 
@@ -50,7 +56,7 @@ def read_text(path: Path) -> str:
 def classify(path: Path) -> tuple[str, int]:
     """返回 (类别, 命中标记数)。类别：annual / research / unknown。"""
     text = read_text(path)
-    a = sum(1 for m in ANNUAL_MARKERS if m in text)
+    a = sum(1 for m in ANNUAL_MARKERS if re.search(m, text))
     r = sum(1 for m in RESEARCH_MARKERS if m in text)
     if a >= 2 and a >= r:
         return "annual", a

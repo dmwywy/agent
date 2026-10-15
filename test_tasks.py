@@ -1154,6 +1154,24 @@ def test_classify_by_content_not_filename(monkeypatch):
     assert ingest.classify(Path("随便叫什么.docx"))[0] == "unknown"
 
 
+def test_classify_accepts_audit_report_wording(monkeypatch):
+    """年度审计报告正文写"合并及母公司资产负债表/利润表/现金流量表"，也必须识别出来。
+
+    这份材料是财报类文件（附审计意见），此前用字面量"合并资产负债表"匹配不到它，
+    整份被判"未识别"，报告里给出的理由是"既不像年报也不像研报"——与事实不符。
+    识别为年报材料后，即便这份审计报告正文不含报表数字、抽不到字段，也会走
+    "未抽到任何核心字段"这条正常的跳过路径，理由与文件性质一致。
+    """
+    from pathlib import Path
+    from src import ingest
+    monkeypatch.setattr(
+        ingest, "read_text",
+        lambda p: "我们审计了贵州茅台公司财务报表，包括 2025 年 12 月 31 日的合并及母公司"
+                  "资产负债表，2025 年度的合并及母公司利润表、合并及母公司现金流量表，"
+                  "以及相关财务报表附注。")
+    assert ingest.classify(Path("随便叫什么.docx"))[0] == "annual"
+
+
 def test_load_structured_ignores_non_field_records():
     """目录里混入研报 claims（也是 JSON 数组）时不得被当成财报字段记录。"""
     from src.pipeline import ROOT, load_structured
