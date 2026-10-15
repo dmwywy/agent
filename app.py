@@ -16,7 +16,8 @@ import streamlit as st
 
 # CSI 口径提示：与报告三格式共用同一份文案，避免"满分 = 全部维度通过"的误导
 # 「异常 / 待复核」计数同样与报告总评同源，见 src.report.merged_anomaly_counts
-from src.report import _csi_caveat, expected_text, loc_str, merged_anomaly_counts
+from src.report import (_csi_caveat, expected_text, loc_str, merged_anomaly_counts,
+                        unprocessed_entries)
 
 ROOT = Path(__file__).resolve().parent
 STATUS_ZH = {"PASS": "通过", "FAIL": "异常", "REVIEW": "需人工复核", "NA": "不适用"}
@@ -182,11 +183,12 @@ if _fresh.get("stale"):
                  "且缺少可复算的中间产物，页面显示的研报引用结论可能落后于当前代码。"
                  "请重启服务后重新上传材料运行。")
 
-# 未识别 / 处理失败的文件必须显式提示：否则用户以为它已经被核查过了
+# 未参与核查的文件必须显式提示（未识别 / 处理失败 / 识别到但没抽出内容）：
+# 否则用户以为它已经被核查过了。判据与报告共用 src.report.unprocessed_entries。
 _ingest_log = _read(base / "ingest_log.json", []) or []
-_unrecognized = [e for e in _ingest_log if e.get("kind") in ("unknown", "error")]
+_unrecognized = unprocessed_entries(_ingest_log)
 if _unrecognized:
-    st.warning("以下上传文件未被识别，**未参与字段提取与一致性核查**："
+    st.warning("以下上传文件**未参与字段提取与一致性核查**："
                + "；".join(f"{e.get('file')}（{e.get('action')}）" for e in _unrecognized))
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(

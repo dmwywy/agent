@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -440,8 +441,31 @@ def audit_rows(model: dict) -> list[list[str]]:
     return rows
 
 
+def is_unprocessed(e: dict) -> bool:
+    """该上传文件是否**没有参与**本次核查。
+
+    ★ 不能只看 kind=unknown/error：实测「年度审计报告docx.docx」被**识别成年报**
+      （kind=annual）却一条核心字段都没抽到（action=「跳过：未抽到任何核心字段」），
+      若只按 kind 判，它既不列进未识别提示，也不出现在任何明细里——使用者会误以为
+      它已被核查。判据因此覆盖三类：
+        ① 未识别（unknown）/ 处理失败（error）；
+        ② 抽到材料但**未产出内容**（action 以「跳过」开头）；
+        ③ 抽取结果为 0 条（如研报抽到 0 条 claim）。
+    """
+    if e.get("kind") in ("unknown", "error"):
+        return True
+    action = str(e.get("action") or "")
+    return action.startswith("跳过") or bool(re.search(r"抽取\s*0\s*条", action))
+
+
+def unprocessed_entries(ingest_log: list[dict] | None) -> list[dict]:
+    """未参与核查的上传件（网页提示与报告标注共用同一口径，避免两端不一致）。"""
+    return [e for e in (ingest_log or [])
+            if e.get("file") not in (None, "-") and is_unprocessed(e)]
+
+
 def ingest_notes(model: dict) -> list[str]:
-    """材料识别结果的事实陈述：**未识别的文件必须显式列出**，不得静默丢弃。
+    """材料识别结果的事实陈述：**未参与核查的文件必须显式列出**，不得静默丢弃。
 
     数据取自 runs/<run_id>/ingest_log.json（src.ingest.process_folder 的 log 落盘）。
     旧运行没有该文件时返回空列表，报告照常生成。
@@ -452,7 +476,7 @@ def ingest_notes(model: dict) -> list[str]:
     for e in model.get("ingest_log") or []:
         text = (f"[{head.get(e.get('kind'), e.get('kind'))}] "
                 f"{e.get('file')}：{e.get('action')}")
-        if e.get("kind") in ("unknown", "error"):
+        if is_unprocessed(e):
             text += ("——该文件未参与字段提取与一致性核查，如需核查请确认材料类型后重新上传。")
         notes.append(text)
     return notes

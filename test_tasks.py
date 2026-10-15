@@ -2527,15 +2527,28 @@ def test_report_flags_unrecognized_files_across_formats():
     _make_run_fixture(run_id)
     log = [{"file": "a_2024.pdf", "kind": "annual", "hits": 3, "action": "抽取 40 条字段"},
            {"file": "审计报告.docx", "kind": "unknown", "hits": 0,
-            "action": "跳过：既不像年报也不像研报"}]
+            "action": "跳过：既不像年报也不像研报"},
+           # ★ 实测踩过：被识别成年报但一条字段都没抽到，只按 kind 判会静默放行
+           {"file": "2025年年度审计报告docx.docx", "kind": "annual", "hits": 3,
+            "action": "跳过：未抽到任何核心字段"},
+           {"file": "研报.pdf", "kind": "research", "hits": 2, "action": "抽取 0 条 claim"}]
     from src.pipeline import ROOT
-    from src.report import build_all
+    from src.report import build_all, unprocessed_entries
     (ROOT / "runs" / run_id / "ingest_log.json").write_text(
         json.dumps(log, ensure_ascii=False), encoding="utf-8")
+
+    # 未参与核查的判据：未识别 / 处理失败 / 跳过未产出 / 抽取 0 条——四类都算
+    assert [e["file"] for e in unprocessed_entries(log)] == [
+        "审计报告.docx", "2025年年度审计报告docx.docx", "研报.pdf"]
+    assert unprocessed_entries(None) == []
 
     notes = ingest_notes({"ingest_log": log})
     assert any("审计报告.docx" in n and "未识别" in n for n in notes)
     assert any("未参与字段提取与一致性核查" in n for n in notes)
+    # 被识别成年报却没抽到字段的文件，同样要标注"未参与核查"，不得因 kind=annual 静默放行
+    assert any("2025年年度审计报告docx.docx" in n
+               and "未参与字段提取与一致性核查" in n for n in notes)
+    assert not any("a_2024.pdf" in n and "未参与" in n for n in notes)
 
     made = build_all(run_id, ("html", "xlsx", "pdf"))
     html = (ROOT / made["html"]).read_text(encoding="utf-8")
