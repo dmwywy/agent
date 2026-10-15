@@ -192,6 +192,10 @@ YOY_TOKEN_RE = re.compile(
     r"|(" + "|".join(YOY_DOWN_WORDS + YOY_UP_WORDS) + r")\s*(\d[\d,]*(?:\.\d+)?)"
     r")\s*%")
 YOY_WINDOW = 15               # "同比±X%"必须紧跟在数值之后，超出窗口就不认（避免挂到别的指标）
+# 金额枚举的"前一项"形态：裸数字（无单位）后紧跟斜杠，如「847/904/982 亿元」里的 904/
+ENUM_LIST_BEFORE_RE = re.compile(r"\d[\d,]*(?:\.\d+)?\s*/\s*$")
+# 百分数序列的"后一项"形态：紧随「/数字」，如「+2.8%/+6.7%/+8.6%」里的 +2.8%
+ENUM_PCT_AFTER_RE = re.compile(r"/\s*[-+]?\d")
 
 
 def period_year_before(sentence: str, fig: dict) -> str | None:
@@ -207,8 +211,32 @@ def period_year_before(sentence: str, fig: dict) -> str | None:
     return years[-1] if years else None
 
 
-def yoy_after(sentence: str, fig: dict) -> tuple[Decimal, str] | None:
-    """取数值之后紧跟的"同比 ±X%"（窗口内），返回 (带符号的百分数, 原串)；没有则 None。"""
+def _enum_before(sentence: str, start: int) -> bool:
+    """本值前面是否为「裸数字 + /」——金额枚举的前一项（如「847/904/982 亿元」的 904/）。
+
+    金额枚举被抽取成一行时，只有**末位**那一个能带上单位（NUM_RE 要求数字后紧跟单位），
+    故判据只需看它的前面：裸数字直接以斜杠分隔、中间没有单位，才是同一串枚举。
+    """
+    return bool(ENUM_LIST_BEFORE_RE.search(sentence[:start]))
+
+
+def _enum_pct_after(sentence: str, end: int) -> bool:
+    """本值后面是否紧跟「/数字」——百分数序列的后一项（如「+2.8%/+6.7%/+8.6%」）。
+
+    ★ 只用于**百分数**（比率/同比）：百分数序列里的下一项必然是数字，跟随的斜杠只可能
+      是枚举分隔。金额绝不能这么判——`茅台酒2025 年收入1465 亿元/+0.39%` 里的斜杠后面
+      跟的是**同比**（也是百分数），据此判枚举会把每次"金额/同比"的正确引用都误转复核，
+      连带把真异常（系列酒 232 亿元）也降级掉。
+    """
+    return bool(ENUM_PCT_AFTER_RE.match(sentence[end:]))
+
+
+def yoy_after(sentence: str, fig: dict) -> tuple[Decimal, str, bool] | None:
+    """取数值之后紧跟的"同比 ±X%"（窗口内）→ (带符号的百分数, 原串, 是否多值枚举)。
+
+    原串从"同比/方向词"起算，**不含**其前导的逗号或斜杠（此前用 `seg[:m.end()]`，
+    会把分隔符一起带出来，报告里显示成「/同比+1.2%」）。没有则返回 None。
+    """
     end = fig.get("num_end")
     if end is None:
         return None
@@ -227,7 +255,8 @@ def yoy_after(sentence: str, fig: dict) -> tuple[Decimal, str] | None:
                 val = -val
     except InvalidOperation:
         return None
-    return val, seg[:m.end()]
+    enumerated = _enum_pct_after(sentence, end + m.end())
+    return val, seg[m.start():m.end()], enumerated
 
 
 def _display_names(fields: dict) -> dict:
@@ -319,6 +348,7 @@ def associate_figures(sentence: str, zh_map: dict) -> dict[str, dict]:
             "name_pos": owner[0],     # 指标名起点：供期间修饰短语比对（见 _period_year）
             "num_end": m.end(),       # 数值终点：供紧随其后的"同比±X%"定位
             "bad_unit": bad_unit,
+            "enumerated": _enum_before(sentence, m.start()),
         })
     return out
 
@@ -353,6 +383,7 @@ def associate_percent(sentence: str, zh_map: dict) -> dict[str, dict]:
             "name_pos": owner[0],
             "num_end": m.end(),
             "bad_unit": "",
+            "enumerated": _enum_before(sentence, m.start()) or _enum_pct_after(sentence, m.end()),
         })
     return out
 
@@ -741,15 +772,18 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
     fy = _fy_index(records)
 
     # 先跑"研报内一致性"检测器（RC03/RC04/RC05）：它们只读研报自身，不依赖财报字段
-    # 与模型输出。已判定的 claim 不再进下面的 RC01/RC02 流程，避免同一处植错被记成
-    # 两条（一条 FAIL + 一条语焉不详的 REVIEW）。
-    det_results, det_fail_ids = _run_detectors(list(claims_by_id.values()))
+    # 与模型输出，故离线也必然可执行。
+    # ★ 此前这里把"已被检测器判定的 claim"整条从 RC01/RC02 流程里排除，看似能避免
+    #   "同一处植错记成两条"，实则是**漏报的正负号根因**：一句话里可以同时有两类错误
+    #   （实测「营业总收入1721 千万元/同比+1.2%」既是单位错、又是同比方向错），按 claim
+    #   整体排除会把第二类错误整条丢掉——标准答案里"同比 +1.2% 方向写反"就这样漏了。
+    #   改为**按(claim_id, cause)去重**（见函数末尾）：同类错误只留检测器那条（带页码/
+    #   表行位置），不同类错误各自保留。
+    det_results, _det_fail_ids = _run_detectors(list(claims_by_id.values()))
 
     results, skipped = list(det_results), []
     for m in matches:
         cid, code, period = m.get("claim_id"), m.get("item_code"), m.get("period")
-        if cid in det_fail_ids:
-            continue
         base = {"rule_id": RULE_ID, "dimension": "C研", "claim_id": cid,
                 "item_code": code, "period": period,
                 "evidence": m.get("evidence", {})}
@@ -803,6 +837,15 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
         if not fig:
             skipped.append({**base, "status": "REVIEW",
                             "reason": "句中该指标名下未定位到金额（或该指标非本句主语），需人工复核"})
+            continue
+
+        # 多值枚举（如「预计归母净利润847/904/982 亿元」）：枚举里哪一个属于本期间无法确定。
+        # NUM_RE 只截得到末位「982 亿元」（实为 2028E），拿它去比 2025 年财报必然张冠李戴，
+        # 凭空产出一条误报。转人工复核，不猜。
+        if fig.get("enumerated"):
+            skipped.append({**base, "status": "REVIEW",
+                            "reason": f"研报为多值枚举（{fig['raw']}），无法判定哪一个是"
+                                      f"本期间（{period}）的数值，需人工复核"})
             continue
 
         truth = Decimal(recs[0]["value"])
@@ -872,32 +915,60 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
         if (rec.get("period_type") == "FY" and code not in RATIO_CODES
                 and not QUARTER_RE.search(sentence)):
             ya = yoy_after(sentence, fig)
-            truth_yoy = yoy_truth(code, period, fy)
-            if ya is not None and truth_yoy is not None:
-                yoy_val, yoy_raw = ya
-                yoy_tol = yoy_tolerance(truth_yoy)
-                if abs(yoy_val - truth_yoy) > yoy_tol:
-                    yoy_diff = yoy_val - truth_yoy
-                    yoy_base = {**base, "rule_id": YOY_RULE_ID,
-                                "left": {"source": "research_report", "raw": yoy_raw,
-                                         "value": str(yoy_val)},
-                                "right": {"item_code": code, "period": period,
-                                          "value": str(truth_yoy)},
-                                "diff": str(yoy_diff), "tolerance": str(yoy_tol),
-                                "matched_text": yoy_raw}
-                    # 符号相反而幅度相当 → 方向写错（如真值 -1.2% 写成 +1.2%），可断言；
-                    # 仅幅度不符 → 可能是口径/四舍五入，转人工复核，不作断言。
-                    if ((yoy_val > 0) != (truth_yoy > 0)
-                            and abs(abs(yoy_val) - abs(truth_yoy)) <= yoy_tol):
-                        results.append({**yoy_base, "status": "FAIL", "severity": "HIGH",
-                                        "cause": "SIGN_ERROR",
-                                        "reason": f"同比方向错误：研报为 {yoy_raw}，"
-                                                  f"财报口径同比为 {truth_yoy}%"})
-                    else:
-                        skipped.append({**yoy_base, "status": "REVIEW",
-                                        "reason": f"研报同比 {yoy_raw} 与财报口径同比 "
-                                                  f"{truth_yoy}% 不符，需人工复核"})
-    return {"results": results, "review": skipped}
+            if ya is not None:
+                yoy_val, yoy_raw, yoy_enumerated = ya
+                yoy_base = {**base, "rule_id": YOY_RULE_ID,
+                            "left": {"source": "research_report", "raw": yoy_raw,
+                                     "value": str(yoy_val)},
+                            "matched_text": yoy_raw}
+                truth_yoy = yoy_truth(code, period, fy)
+                if truth_yoy is None:
+                    # 财报侧缺上一期（如只上传了单份年报）→ 同比既无真值可比，也必须**显式**
+                    # 留痕。此前这里是静默跳过：研报把同比方向写反，报告上完全看不见——
+                    # 那正是"正负号漏报"的结构性温床。
+                    skipped.append({**yoy_base, "status": "REVIEW",
+                                    "reason": f"研报标注了同比（{yoy_raw}），但财报侧缺少"
+                                              f"上一期（上一年度）数据，方向与幅度无法核验，"
+                                              f"需人工复核"})
+                elif yoy_enumerated:
+                    skipped.append({**yoy_base, "status": "REVIEW",
+                                    "reason": f"研报同比为多值枚举（{yoy_raw}），无法判定"
+                                              f"本期间（{period}）口径，需人工复核"})
+                else:
+                    yoy_tol = yoy_tolerance(truth_yoy)
+                    if abs(yoy_val - truth_yoy) > yoy_tol:
+                        yoy_diff = yoy_val - truth_yoy
+                        yoy_base = {**yoy_base,
+                                    "right": {"item_code": code, "period": period,
+                                              "value": str(truth_yoy)},
+                                    "diff": str(yoy_diff), "tolerance": str(yoy_tol)}
+                        # 符号相反而幅度相当 → 方向写错（如真值 -1.2% 写成 +1.2%），可断言；
+                        # 仅幅度不符 → 可能是口径/四舍五入，转人工复核，不作断言。
+                        if ((yoy_val > 0) != (truth_yoy > 0)
+                                and abs(abs(yoy_val) - abs(truth_yoy)) <= yoy_tol):
+                            results.append({**yoy_base, "status": "FAIL", "severity": "HIGH",
+                                            "cause": "SIGN_ERROR",
+                                            "reason": f"同比方向错误：研报为 {yoy_raw}，"
+                                                      f"财报口径同比为 {truth_yoy}%"})
+                        else:
+                            skipped.append({**yoy_base, "status": "REVIEW",
+                                            "reason": f"研报同比 {yoy_raw} 与财报口径同比 "
+                                                      f"{truth_yoy}% 不符，需人工复核"})
+
+    # ── 收尾去重（与函数开头那段说明配套）────────────────────────────────────────
+    # ① 检测器（RC03/RC04/RC05）与 RC01/RC02 对**同一 claim、同一 cause** 只留一条：
+    #    同一处植错被两条规则同时抓到属正常，但只应计一次；检测器条目带页码/表行位置，
+    #    可复核性更强，故以它为准（**不同 cause** 的结论一律保留，见开头的漏报说明）。
+    decided = {(r.get("claim_id"), r.get("cause")) for r in det_results}
+    results = [r for r in results
+               if not (str(r.get("rule_id") or "").startswith(("RC01", "RC02"))
+                       and (r.get("claim_id"), r.get("cause")) in decided)]
+    # ② 已判为异常（FAIL）的 claim 不再重复进「待人工复核」清单：同一处问题既进 FAIL
+    #    又进 REVIEW，会让异常计数翻倍、复核清单出现伪条目（如"该 claim 无结构化数据"
+    #    这类伪条目，在该 claim 已判出真异常时毫无信息增量）。
+    failed = {r.get("claim_id") for r in results if r.get("status") == "FAIL"}
+    return {"results": results,
+            "review": [r for r in skipped if r.get("claim_id") not in failed]}
 
 
 def dedup_claim_matches(matches: list[dict]) -> tuple[list[dict], list[dict]]:

@@ -684,8 +684,8 @@ def test_malformed_unit_is_flagged():
 def test_research_check_flags_unit_error_against_real_value():
     """用真实财报值验证：862.3亿万元的单位错误必须判 FAIL/UNIT_SCALE。
 
-    该句由研报内检测器 RC04（单位口径）判定；claim_id 一旦判定，就不再走 RC01，
-    故结果恰好 1 条（避免同一处植错被记成两条）。
+    该句由研报内检测器 RC04（单位口径）判定；RC01 也会得出同因（UNIT_SCALE），按
+    (claim_id, cause) 去重后只留检测器那条（带页码/表行位置），故结果恰好 1 条。
     """
     from src.research_check import check
     matches = [{"claim_id": "c1", "item_code": "NP_PARENT", "period": "2024",
@@ -989,6 +989,89 @@ def test_intra_detector_fail_is_not_duplicated_in_review():
     out = check(matches, claims, [])
     assert [r["status"] for r in out["results"]] == ["FAIL"]
     assert out["review"] == []
+
+
+def test_one_claim_can_carry_two_causes():
+    """同一句话里的两类错误都要报出来，不得按 claim 整体排他。
+
+    回归背景（2025 批·标准答案错误1+错误4）：「营业总收入1721 千万元/同比+1.2%」
+    既是单位错（应为亿元）、又是同比方向错（真值 -1.20%）。此前 claim 一旦被 RC04 判为
+    单位错就整条不再走 RC01/RC02，同比方向错被整条丢掉——这正是"正负号漏报"的根因。
+    """
+    from src.research_check import check
+    matches = [{"claim_id": "c1", "item_code": "TOTAL_REVENUE", "period": "2025",
+                "evidence": {}}]
+    claims = {"c1": {"claim_id": "c1", "kind": "TEXT", "page": 1, "para_no": 2,
+                     "sentence": "2025 年公司实现营业总收入1721 千万元/同比+1.2%；"}}
+    records = [
+        {"item_code": "TOTAL_REVENUE", "period": "2025", "period_type": "FY",
+         "value": "172054171890.91"},
+        {"item_code": "TOTAL_REVENUE", "period": "2024", "period_type": "FY",
+         "value": "174144069958.25"},
+    ]
+    out = check(matches, claims, records)
+    fails = [r for r in out["results"] if r["status"] == "FAIL"]
+    assert sorted(r["cause"] for r in fails) == ["SIGN_ERROR", "UNIT_SCALE"]
+    rc02 = [r for r in fails if r["rule_id"].startswith("RC02")]
+    assert "同比方向错误" in rc02[0]["reason"]
+    assert rc02[0]["left"]["raw"] == "同比+1.2%"          # 原串不得带前导分隔符
+    assert out["review"] == []                            # 已判异常的 claim 不再重复进复核
+
+
+def test_research_check_multi_value_enumeration_is_review_not_fail():
+    """多值枚举（847/904/982 亿元）不得拿末位去比本期间——判 REVIEW，不判 FAIL。
+
+    回归背景（2025 批）：`预计归母净利润847/904/982 亿元` 里 NUM_RE 只截到末位
+    「982 亿元」（实为 2028E），却被当成 2025 年值去比财报 823.2 亿元，凭空产出一条
+    "研报值 982 亿 vs 财报 823 亿"的误报（标准答案并未植错）。
+    """
+    from src.research_check import check
+    matches = [{"claim_id": "c1", "item_code": "NP_PARENT", "period": "2025",
+                "evidence": {}}]
+    claims = {"c1": {"claim_id": "c1", "kind": "TEXT",
+                     "sentence": "我们预计 2025 年归母净利润847/904/982 亿元，"
+                                 "同比+2.8%/+6.7%/+8.6%（前值 26/27 年 895/914 亿元）。"}}
+    records = [{"item_code": "NP_PARENT", "period": "2025", "period_type": "FY",
+                "value": "82320067101.68"}]
+    out = check(matches, claims, records)
+    assert out["results"] == []
+    assert out["review"][0]["status"] == "REVIEW"
+    assert "多值枚举" in out["review"][0]["reason"]
+
+
+def test_research_check_yoy_without_prior_year_is_review():
+    """研报标了同比、财报侧却没有上一年度数：必须显式留痕，不得静默跳过。
+
+    回归背景：只上传单份年报时，同比既无真值可比也无任何提示——研报把方向写反
+    在报告上完全看不见，这正是"正负号漏报"的结构性温床。
+    """
+    from src.research_check import check
+    matches = [{"claim_id": "c1", "item_code": "TOTAL_REVENUE", "period": "2025",
+                "evidence": {}}]
+    claims = {"c1": {"claim_id": "c1", "kind": "TEXT",
+                     "sentence": "2025 年公司实现营业总收入1720.5 亿元/同比+1.2%；"}}
+    records = [{"item_code": "TOTAL_REVENUE", "period": "2025", "period_type": "FY",
+                "value": "172054171890.91"}]
+    out = check(matches, claims, records)
+    assert [r["rule_id"] for r in out["results"]] == ["RC01@v1.0"]   # 金额本身对得上
+    assert out["review"][0]["rule_id"].startswith("RC02")
+    assert "上一期" in out["review"][0]["reason"]
+
+
+def test_research_check_amount_followed_by_yoy_is_not_enumeration():
+    """「金额/+X%」里的斜杠是分隔符而非枚举分隔，不得被判成多值枚举。
+
+    回归背景：曾把「茅台酒2025 年收入1465 亿元/+0.39%」判成枚举转复核，连带把真异常
+    「系列酒 2025 年收入 232亿元」也降级掉了——金额的枚举只能看它**前面**是否为裸数字+斜杠。
+    """
+    from src.research_check import associate_figures
+    got = associate_figures("1）茅台酒2025 年收入1465 亿元/+0.39%，"
+                            "2）系列酒 2025 年收入 232亿元/-9.8% ；", _ZH)
+    assert got["REVENUE_MOUTAI"]["enumerated"] is False
+    assert got["REVENUE_SERIES"]["enumerated"] is False
+    # 真枚举：末位带单位的那一个，其前面是「裸数字 + /」
+    got2 = associate_figures("预计归母净利润847/904/982 亿元", _ZH)
+    assert got2["NP_PARENT"]["enumerated"] is True
 
 
 def test_yoy_truth_rejects_non_fy_period():
