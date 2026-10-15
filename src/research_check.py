@@ -736,6 +736,9 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
     tol_cfg = _load_tolerance()
     profile = tol_cfg["profiles"][TOLERANCE_PROFILE]
     idx = _index_records(records)
+    # 同比基准索引（D2/RC02 用）：records 在整个 check 调用中固定不变，只构建一次。
+    # ★ 不要放进下面的 matches 循环里逐条重建——那是 O(条数 × 记录数) 的无谓开销。
+    fy = _fy_index(records)
 
     # 先跑"研报内一致性"检测器（RC03/RC04/RC05）：它们只读研报自身，不依赖财报字段
     # 与模型输出。已判定的 claim 不再进下面的 RC01/RC02 流程，避免同一处植错被记成
@@ -869,7 +872,7 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
         if (rec.get("period_type") == "FY" and code not in RATIO_CODES
                 and not QUARTER_RE.search(sentence)):
             ya = yoy_after(sentence, fig)
-            truth_yoy = yoy_truth(code, period, _fy_index(records))
+            truth_yoy = yoy_truth(code, period, fy)
             if ya is not None and truth_yoy is not None:
                 yoy_val, yoy_raw = ya
                 yoy_tol = yoy_tolerance(truth_yoy)
