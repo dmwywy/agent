@@ -3,21 +3,30 @@ setlocal
 cd /d "%~dp0"
 
 REM ============================================================
-REM  一键复现：从上到下依次执行，双击即可，无需改动
-REM  1) 离线运行 + 仓库自带 demo 数据（默认，不需要 API Key）
-REM  2) 想用自己的材料：把下面第 3 行 FROM 打开并填文件夹路径
-REM  3) 想在线运行：把下面第 4 行的 MODE 改成空
+REM  一键复现：从上到下依次执行，双击即可
+REM  运行时会让你输入材料文件夹路径；直接回车则用仓库自带 demo 数据
 REM ============================================================
 set "RUNID=reproduce"
-set "FROM="
 set "MODE=--offline"
-REM set "FROM=D:\评委给的材料"
-REM set "MODE="
+REM 想在线运行：把上面这行改成  set "MODE="  （需先配好 .env 中的 DEEPSEEK_API_KEY）
+
+echo.
+echo ==== 第 0 步：输入材料文件夹路径 ====
+echo   文件夹里可混放年报 / 研究报告的 PDF、DOCX（支持多份）。
+set /p "FROM=请输入路径，直接回车 = 使用仓库自带 demo 数据："
+set FROM=%FROM:"=%
+if "%FROM:~-1%"=="\" set "FROM=%FROM:~0,-1%"
+if defined FROM (
+  echo   [OK] 已选择：%FROM%
+) else (
+  echo   [OK] 未输入，使用仓库自带 demo 数据
+)
+echo   运行模式：%MODE%
 
 echo.
 echo ==== [1/6] 检查运行环境 ====
 python -V || goto :fail
-python -c "import openai,pydantic,yaml,pdfplumber,reportlab,openpyxl,pandas,streamlit" || goto :dep
+python -c "import openai,pydantic,yaml,pdfplumber,reportlab,openpyxl,pandas,streamlit" 2>nul || goto :dep
 echo   [OK] Python 与依赖齐备
 
 echo.
