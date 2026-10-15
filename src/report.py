@@ -359,6 +359,17 @@ def _review_sentence(item: dict) -> str:
     return (item.get("evidence") or {}).get("sentence") or item.get("sentence") or ""
 
 
+def expected_text(item: dict) -> str:
+    """「应为（正确值）」：这一处**改成什么才对**。
+
+    ★ 只写"哪里错了"不够——实测使用者看到「单位写法不属于本系统认可的量级单位：
+      千万元（1721千万元）」无法判断该改成亿元还是百万元。故每条结论都带终值：
+      确定性结论取 ``expected``（RC01~RC05 由程序算出），模型语义审计提示取
+      ``expected_value``（RC06，性质是提示），两者都没有时返回「—」（不臆造）。
+    """
+    return (item.get("expected") or item.get("expected_value") or "—")
+
+
 def loc_str(ev: dict) -> str:
     """证据位置（人类可读）：页码 + 章节 + 段号/表行号 + 表标题。
 
@@ -391,13 +402,14 @@ def loc_str(ev: dict) -> str:
 
 
 def research_review_rows(model: dict) -> list[list[str]]:
-    """研报引用「待人工复核」条目的表格行：(科目, 期间, 原因, 研报原句, 位置)。
+    """研报引用「待人工复核」条目的表格行：(科目, 期间, 原因, 研报原句, 应为, 位置)。
 
     ★ 只给计数不给明细，评审无从核对到底是哪几句没比对上；报告必须逐条列出。
-    ★ 位置列固定放在末位，不改动前四列的既有下标（报告其它处与测试依赖该顺序）。
+    ★ 新增「应为」列插在**原句之后、位置之前**：前四列（含原因、原句）的既有下标不变，
+      位置仍居末位（报告其它处与测试依赖 0~3 下标）。
     """
     return [[x.get("item_code") or "—", str(x.get("period") or "—"),
-             x.get("reason", ""), _review_sentence(x),
+             x.get("reason", ""), _review_sentence(x), expected_text(x),
              loc_str(x.get("evidence"))]
             for x in (model.get("research") or {}).get("review") or []]
 
@@ -755,23 +767,26 @@ def render_pdf(model: dict, path: Path) -> Path:
     if model["research_fail"] or _rv_rows:
         story.append(Paragraph("五、研报引用异常与待人工复核", h2))
         if model["research_fail"]:
-            rows = [["科目", "期间", "研报值", "财报值", "差异", "归因", "位置"]]
+            rows = [["科目", "期间", "研报值", "财报值", "差异",
+                     "应为（正确值）", "归因", "位置"]]
             for r in model["research_fail"]:
                 rows.append([r.get("item_code") or "—", str(r.get("period") or "—"),
                              (r.get("left") or {}).get("raw", ""),
                              (r.get("right") or {}).get("value", "")[:18],
                              (r.get("diff") or "")[:18],
+                             expected_text(r),
                              f"{r.get('cause','')} {r.get('reason','')}",
                              loc_str(r.get("evidence"))])
-            story.append(tbl(rows, widths=[16 * mm, 16 * mm, 24 * mm, 26 * mm,
-                                           16 * mm, 30 * mm, 37 * mm]))
+            story.append(tbl(rows, widths=[16 * mm, 14 * mm, 20 * mm, 22 * mm,
+                                           12 * mm, 30 * mm, 26 * mm, 25 * mm]))
         if _rv_rows:
             story.append(Paragraph(
                 f"待人工复核 {len(_rv_rows)} 条（程序无法自动判定，不代表存在错误）："
                 + "；".join(research_review_reasons(model)), small))
-            rows = [["科目", "期间", "原因", "研报原句", "位置"]]
+            rows = [["科目", "期间", "原因", "研报原句", "应为（正确值）", "位置"]]
             rows.extend(_rv_rows)
-            story.append(tbl(rows, widths=[20 * mm, 16 * mm, 52 * mm, 46 * mm, 31 * mm]))
+            story.append(tbl(rows, widths=[18 * mm, 14 * mm, 38 * mm, 36 * mm,
+                                           34 * mm, 25 * mm]))
             story.append(Spacer(1, 5))
 
     # 模型语义审计提示（RC06）：程序规则覆盖不到的语义型问题，由模型不限类型地指出。
@@ -1019,22 +1034,24 @@ def render_xlsx(model: dict, path: Path) -> Path:
     rc = (model["research"] or {}).get("results", [])
     if rc:
         sheet("研报引用", ["状态", "科目", "期间", "研报原文值", "研报数值", "财报值",
-                           "差异", "容差", "归因", "说明", "研报原句", "位置"],
+                           "差异", "容差", "应为（正确值）", "归因", "说明", "研报原句", "位置"],
               [[r.get("status"), r.get("item_code") or "—", str(r.get("period") or "—"),
                 (r.get("left") or {}).get("raw"), (r.get("left") or {}).get("value"),
                 (r.get("right") or {}).get("value"), r.get("diff"), r.get("tolerance"),
-                r.get("cause"), r.get("reason"), (r.get("evidence") or {}).get("sentence"),
+                expected_text(r), r.get("cause"), r.get("reason"),
+                (r.get("evidence") or {}).get("sentence"),
                 loc_str(r.get("evidence"))]
                for r in rc])
 
     # 待复核
-    sheet("待人工复核", ["类型", "编号/科目", "原因", "原文", "位置"],
+    sheet("待人工复核", ["类型", "编号/科目", "原因", "原文", "应为（正确值）", "位置"],
           [["规则", r.get("rule_id"), r.get("reason", ""),
-            (r.get("evidence") or {}).get("raw_text", ""), loc_str(r.get("evidence"))]
+            (r.get("evidence") or {}).get("raw_text", ""), expected_text(r),
+            loc_str(r.get("evidence"))]
            for r in model["rule_results"]
            if r.get("status") == "REVIEW"]
           + [["研报", x.get("claim_id", ""), x.get("reason", ""), _review_sentence(x),
-              loc_str(x.get("evidence"))]
+              expected_text(x), loc_str(x.get("evidence"))]
              for x in (model.get("research") or {}).get("review", [])])
 
     # 语义审计提示（RC06）：模型自由审计给出的、程序规则覆盖不到的疑似问题。
@@ -1161,10 +1178,12 @@ def render_html(model: dict, path: Path) -> Path:
         sections.append("<h2>五、研报引用异常与待人工复核</h2>")
         if model["research_fail"]:
             sections.append(_table(
-                ["状态", "科目", "期间", "研报原文", "研报值", "财报值", "差异", "归因", "位置"],
+                ["状态", "科目", "期间", "研报原文", "研报值", "财报值", "差异",
+                 "应为（正确值）", "归因", "位置"],
                 [[r.get("status"), r.get("item_code") or "—", str(r.get("period") or "—"),
                   (r.get("left") or {}).get("raw"), (r.get("left") or {}).get("value"),
                   (r.get("right") or {}).get("value"), r.get("diff"),
+                  expected_text(r),
                   f"{r.get('cause','')} {r.get('reason','')}",
                   loc_str(r.get("evidence"))]
                  for r in model["research_fail"]]))
@@ -1172,7 +1191,8 @@ def render_html(model: dict, path: Path) -> Path:
             sections.append(f'<p class="meta">待人工复核 {len(_rv_rows)} 条'
                             f'（程序无法自动判定，不代表存在错误）：'
                             f'{_esc("；".join(research_review_reasons(model)))}</p>')
-            sections.append(_table(["科目", "期间", "原因", "研报原句", "位置"], _rv_rows))
+            sections.append(_table(
+                ["科目", "期间", "原因", "研报原句", "应为（正确值）", "位置"], _rv_rows))
 
     # 模型语义审计提示（RC06）：与"异常"分开呈现，性质是提示而非判定
     _au_rows = audit_rows(model)

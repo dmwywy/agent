@@ -1013,7 +1013,9 @@ def test_one_claim_can_carry_two_causes():
     fails = [r for r in out["results"] if r["status"] == "FAIL"]
     assert sorted(r["cause"] for r in fails) == ["SIGN_ERROR", "UNIT_SCALE"]
     rc02 = [r for r in fails if r["rule_id"].startswith("RC02")]
-    assert "同比方向错误" in rc02[0]["reason"]
+    assert "同比方向" in rc02[0]["reason"]                # 文案措辞可换，方向必须点名
+    assert "正负号" in rc02[0]["reason"]
+    assert rc02[0]["expected"] == "-1.2%"                 # 「应为（正确值）」给出真值
     assert rc02[0]["left"]["raw"] == "同比+1.2%"          # 原串不得带前导分隔符
     assert out["review"] == []                            # 已判异常的 claim 不再重复进复核
 
@@ -1214,6 +1216,11 @@ def test_malformed_unit_does_not_crash():
                   "value": "172054171890.91", "page": 61, "chunk_id": "p061_t1"}])
     assert out["results"][0]["status"] == "FAIL"
     assert out["results"][0]["cause"] == "UNIT_SCALE"
+    # 说明必须**指名道姓**该改成哪种单位，并给出终值——只写"千万元不是认可的单位"
+    # 使用者无法判断该改成亿元还是百万元（实测的反馈即是这一点看不懂）。
+    r0 = out["results"][0]
+    assert "亿元" in r0["reason"] and "1721亿元" in r0["reason"]
+    assert r0["expected"] == "1721亿元"
 
 
 def test_research_check_survives_bad_sentence(monkeypatch):
@@ -1697,6 +1704,7 @@ def _make_run_fixture(run_id: str) -> None:
              "right": {"item_code": "TOTAL_REVENUE", "period": "2024", "value": "170000000000"},
              "diff": "4140000000", "tolerance": "1000", "severity": "HIGH",
              "cause": "VALUE_ERROR", "reason": "研报值 / 财报值 = 1.0244，非 10 的整数次幂",
+             "expected": "1741.4亿元",
              "evidence": {"file": "b.docx", "section": "核心观点",
                           "sentence": "公司2024年营业总收入1741.4亿元",
                           "verified": True}},
@@ -2469,6 +2477,45 @@ def test_report_lists_research_review_items_not_only_counts():
     assert "预计2025年收入增长8%" in text
     # 收尾的「人工复核记录」也须给出合并后的待复核数，不能显示 0
     assert "待人工复核 1 条" in text
+
+
+def test_reports_show_expected_correct_value_column():
+    """四端表格必须给出「应为（正确值）」列：只写哪里错了不够，还要写改成什么才对。"""
+    from openpyxl import load_workbook
+    from src.pipeline import ROOT
+    from src.report import build_all, expected_text, research_review_rows
+
+    run_id = "pytest_report_expected_col"
+    _make_run_fixture(run_id)
+    made = build_all(run_id, ("html", "xlsx", "pdf"))
+
+    # 取值口径：确定性结论取 expected，模型提示取 expected_value，都没有则「—」
+    assert expected_text({"expected": "1721亿元"}) == "1721亿元"
+    assert expected_text({"expected_value": "应为 -1.2%"}) == "应为 -1.2%"
+    assert expected_text({}) == "—"
+
+    # 待复核行：前四列下标不变，第 5 列为「应为」，位置仍在末位
+    rows = research_review_rows({"research": json.loads(
+        (ROOT / "runs" / run_id / "rules" / "research_claims.json").read_text(encoding="utf-8"))})
+    assert rows[0][3].startswith("预计2025年收入增长8%")
+    assert rows[0][4] == "—"                # 该条无终值，不得臆造
+    assert rows[0][5]                      # 位置列仍居末位
+    assert len(rows[0]) == 6
+
+    html = (ROOT / made["html"]).read_text(encoding="utf-8")
+    assert "应为（正确值）" in html and "1741.4亿元" in html
+
+    wb = load_workbook(ROOT / made["xlsx"])
+    head = [str(c.value) for c in next(wb["研报引用"].iter_rows())]
+    assert "应为（正确值）" in head
+    cells = [str(c.value) for row in wb["研报引用"].iter_rows() for c in row if c.value]
+    assert "1741.4亿元" in cells
+    head_rv = [str(c.value) for c in next(wb["待人工复核"].iter_rows())]
+    assert "应为（正确值）" in head_rv
+
+    with __import__("pdfplumber").open(ROOT / made["pdf"]) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    assert "应为（正确值）" in text and "1741.4亿元" in text
 
 
 def test_report_flags_unrecognized_files_across_formats():

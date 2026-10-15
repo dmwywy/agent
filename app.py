@@ -16,7 +16,7 @@ import streamlit as st
 
 # CSI 口径提示：与报告三格式共用同一份文案，避免"满分 = 全部维度通过"的误导
 # 「异常 / 待复核」计数同样与报告总评同源，见 src.report.merged_anomaly_counts
-from src.report import _csi_caveat, loc_str, merged_anomaly_counts
+from src.report import _csi_caveat, expected_text, loc_str, merged_anomaly_counts
 
 ROOT = Path(__file__).resolve().parent
 STATUS_ZH = {"PASS": "通过", "FAIL": "异常", "REVIEW": "需人工复核", "NA": "不适用"}
@@ -232,7 +232,8 @@ with tab1:
             "期间": str(x.get("period") or "—"),
             "研报原文值": (x.get("left") or {}).get("raw"),
             "财报值": (x.get("right") or {}).get("value"),
-            "差异": x.get("diff"), "归因": x.get("cause"), "说明": x.get("reason"),
+            "差异": x.get("diff"), "应为（正确值）": expected_text(x),
+            "归因": x.get("cause"), "说明": x.get("reason"),
             "位置": loc_str(x.get("evidence")),
         } for x in rf]), width='stretch')
 
@@ -247,6 +248,7 @@ with tab1:
             "科目": x.get("item_code") or "—", "期间": x.get("period") or "—",
             "原因": x.get("reason", ""),
             "研报原句": (x.get("evidence") or {}).get("sentence") or "—",
+            "应为（正确值）": expected_text(x),
             "位置": loc_str(x.get("evidence")),
         } for x in rv]), width='stretch', hide_index=True)
 

@@ -461,15 +461,21 @@ def _report_year(claim_id: str) -> int | None:
 
 
 def _claim_record(rule_id: str, claim: dict, cause: str, reason: str,
-                  left: dict, right: dict, diff: str) -> dict:
-    """检测器产出的结果条目：字段与 RC01 保持一致，另带**位置**（页码/段落/表行）。"""
+                  left: dict, right: dict, diff: str, expected: str = "—") -> dict:
+    """检测器产出的结果条目：字段与 RC01 保持一致，另带**位置**（页码/段落/表行）。
+
+    ★ expected = 「这一处本来应该是什么」的终值（正确单位写法、正确幅度、正确时点…）。
+      报告四端把它单列一列「应为（正确值）」：只给"哪里错了"不够，复核的人还要知道
+      "改成什么才对"，否则说明看不懂（实测：只写"千万元不属于认可的量级单位"，
+      使用者无法判断该改成亿元还是百万元）。
+    """
     return {
         "rule_id": rule_id, "dimension": "C研", "claim_id": claim.get("claim_id"),
         "item_code": None, "period": None, "status": "FAIL",
         "left": {"source": "research_report", **left},
         "right": {"source": "research_report", **right},
         "diff": diff, "tolerance": None, "severity": "HIGH",
-        "cause": cause, "reason": reason,
+        "cause": cause, "reason": reason, "expected": expected,
         "evidence": {
             "file": claim.get("source"), "section": claim.get("section"),
             "sentence": claim.get("sentence"), "page": claim.get("page"),
@@ -515,8 +521,8 @@ def _pct_row_values(claim: dict) -> list[Decimal] | None:
     return vals or None
 
 
-def _selfcheck_row(claim: dict) -> tuple[str, str] | None:
-    """RC03：调整表的"调整幅度"列是否与其数据列自洽 → (cause, reason) 或 None。
+def _selfcheck_row(claim: dict) -> tuple[str, str, str] | None:
+    """RC03：调整表的"调整幅度"列是否与其数据列自洽 → (cause, reason, expected) 或 None。
 
     形态：`营业收入（百万元） | 旧2026E | 旧2027E | 新2026E | 新2027E | 幅度2026E | 幅度2027E`
     幅度应由 (新 ÷ 旧 − 1) × 100 得到。末 k 个百分号即 k 个幅度，其前 2k 个数值
@@ -549,13 +555,17 @@ def _selfcheck_row(claim: dict) -> tuple[str, str] | None:
     if sign_bad:
         e, calc = sign_bad[0]
         return ("SIGN_ERROR",
-                f"表内自校验：调整幅度 {e}% 的符号与「(新值 ÷ 旧值 − 1)」算得的 "
-                f"{calc:.2f}% 相反，方向写错")
+                f"表内自校验：调整幅度列写「{e}%」，而用同一行的数据列按"
+                f"「(新值 ÷ 旧值 − 1)」重算得 {calc:.2f}%——两者数值相当、符号相反，"
+                f"正负号写反了。",
+                f"{calc:.2f}%")
     if value_bad:
         e, calc = value_bad[0]
         return ("VALUE_ERROR",
-                f"表内自校验：调整幅度列写 {e}%，但按「(新值 ÷ 旧值 − 1)」应为 "
-                f"{calc.quantize(Decimal('0.1'))}%（数据列与幅度列不自洽）")
+                f"表内自校验：调整幅度列写「{e}%」，而用同一行的数据列按"
+                f"「(新值 ÷ 旧值 − 1)」重算得 {calc.quantize(Decimal('0.1'))}%——"
+                f"幅度列与数据列不自洽。",
+                f"{calc.quantize(Decimal('0.1'))}%")
     return None
 
 
@@ -573,10 +583,57 @@ def _doc_unit(claims: list[dict]) -> str | None:
     return max(tally.items(), key=lambda kv: kv[1])[0]
 
 
+def _text_unit(claims: list[dict], fallback: str | None = None) -> str:
+    """正文口径的量级单位：研报**正文**习惯写「亿元」，表内才用「百万元」。
+
+    单说"千万元不是认可的单位"没用——复核的人要知道该改成哪一种。本办法统计正文里
+    出现最多的合法量级单位，作为"应改写成……"的依据；正文没有任何金额时退回表内口径。
+    """
+    tally: dict[str, int] = {}
+    for c in claims:
+        if c.get("kind") != "TEXT":
+            continue
+        for m in NUM_RE.finditer(str(c.get("sentence") or "")):
+            unit = m.group(3)
+            if unit not in UNIT_SCALE:
+                continue
+            tally[_unit_alias(unit)] = tally.get(_unit_alias(unit), 0) + 1
+    if tally:
+        return max(tally.items(), key=lambda kv: kv[1])[0]
+    return _unit_alias(fallback) if fallback else "亿元"
+
+
+def _unit_alias(unit: str | None) -> str:
+    """同一量级的单/双字写法归一到常用写法：「亿」→「亿元」、「万」→「万元」。"""
+    return {"亿": "亿元", "万": "万元", "千": "千元", "万亿": "万亿元"}.get(unit or "", unit or "")
+
+
+def _num_str(v) -> str:
+    """数值 → 不带千分位、不带科学计数法的显示串。"""
+    try:
+        d = Decimal(str(v)).normalize()
+    except (InvalidOperation, TypeError, ValueError):
+        return "—"
+    return f"{d:f}"
+
+
+def _amount_in_unit(value, unit: str) -> str:
+    """金额（以"元"为单位）换算到指定量级单位后显示，保留两位小数、去掉多余的 0。"""
+    scale = UNIT_SCALE.get(_unit_alias(unit))
+    if not scale:
+        return f"{_num_str(value)}元"
+    try:
+        q = (Decimal(str(value)) / scale).quantize(Decimal("0.01")).normalize()
+    except (InvalidOperation, TypeError, ValueError):
+        return f"{_num_str(value)}元"
+    return f"{_num_str(q)}{_unit_alias(unit)}"
+
+
 def _unit_consistency(claims: list[dict]) -> list[dict]:
     """RC04：① 表行标签单位与文档统一口径不一致；② 正文数值用了非量级单位写法。"""
     out, seen = [], set()
     doc_unit = _doc_unit(claims)
+    text_unit = _text_unit(claims, doc_unit)
     for c in claims:
         cid = c.get("claim_id")
         s = str(c.get("sentence") or "")
@@ -593,10 +650,11 @@ def _unit_consistency(claims: list[dict]) -> list[dict]:
                 continue                          # 每股收益（元）等非报表口径行
             out.append(_claim_record(
                 UNIT_RULE_ID, c, "UNIT_SCALE",
-                f"单位口径不一致：本行标签标注「{unit}」，而本研报其余报表行统一为"
-                f"「{doc_unit}」，同一份研报内单位混用",
-                {"raw": label, "value": ""}, {"raw": doc_unit, "value": ""},
-                f"{unit} ≠ {doc_unit}"))
+                f"单位口径不一致：本行标签把「{prefix}」的单位标成「{unit}」，"
+                f"而本研报表内其余报表行统一用「{doc_unit}」——同一份研报里混用了两种"
+                f"列报单位。应写作「{prefix}（{doc_unit}）」，或把全表单位统一成一种。",
+                {"raw": label, "value": ""}, {"raw": doc_unit, "value": ""}, "—",
+                expected=f"{prefix}（{doc_unit}）"))
             seen.add(cid)
         else:
             # 正文里的畸形/非本口径单位（如「862.3 亿万元」「1721 千万元」）。
@@ -605,12 +663,16 @@ def _unit_consistency(claims: list[dict]) -> list[dict]:
             bad = next((m for m in NUM_RE.finditer(s) if m.group(3) not in UNIT_SCALE), None)
             if bad is None or cid in seen:
                 continue
+            num, bad_unit = bad.group(2), bad.group(3)
             out.append(_claim_record(
                 UNIT_RULE_ID, c, "UNIT_SCALE",
-                f"单位写法不属于本系统认可的量级单位：{bad.group(3)}"
-                f"（{bad.group(2)}{bad.group(3)}）",
-                {"raw": bad.group(2) + bad.group(3), "value": ""},
-                {"raw": "/".join(UNIT_SCALE), "value": ""}, "—"))
+                f"单位写法有误：研报把金额写成「{num}{bad_unit}」，而「{bad_unit}」不是常用的"
+                f"量级单位写法（常用：万元 / 百万元 / 亿元 / 万亿元）。本研报其余金额统一按"
+                f"「{text_unit}」表述，这一处应写作「{num}{text_unit}」——数字不动、只写错"
+                f"单位，会让人把金额读错量级。",
+                {"raw": f"{num}{bad_unit}", "value": ""},
+                {"raw": text_unit, "value": ""}, "—",
+                expected=f"{num}{text_unit}"))
             seen.add(cid)
     return out
 
@@ -624,8 +686,9 @@ def _intra_report_checks(claims: list[dict]) -> tuple[list[dict], set[str]]:
     all_pct_rows = [(c, _pct_row_values(c)) for c in rows]
     all_pct_rows = [(c, v) for c, v in all_pct_rows if v]
 
-    def add(claim, cause, reason, left, right, diff):
-        out.append(_claim_record(INTRA_RULE_ID, claim, cause, reason, left, right, diff))
+    def add(claim, cause, reason, left, right, diff, expected="—"):
+        out.append(_claim_record(INTRA_RULE_ID, claim, cause, reason, left, right, diff,
+                                 expected))
         flagged.add(claim.get("claim_id"))
 
     for c in texts:
@@ -643,30 +706,33 @@ def _intra_report_checks(claims: list[dict]) -> tuple[list[dict], set[str]]:
             y1, y2 = int(m.group(1)), int(m.group(2))
             if y1 <= year and y2 - y1 <= 6:
                 add(c, "PERIOD_MISMATCH",
-                    f"预测年份区间起点为 {y1} 年，不晚于本研报所属年度 {year} 年；"
-                    f"向前的预测区间应自 {year} 年之后起算（正文写 {y1}-{y2} 年）",
+                    f"预测区间写的是 {y1}-{y2} 年，起点 {y1} 年不晚于本研报所属年度 {year} 年；"
+                    f"向前的预测只能从尚未结束的年度起算，{y1} 年已披露、不能当预测起点。",
                     {"raw": f"{y1}-{y2}年", "value": ""},
-                    {"raw": f"起点应 > {year}", "value": ""}, "—")
+                    {"raw": f"起点应 > {year}", "value": ""}, "—",
+                    f"起点应晚于 {year} 年（如 {year + 1} 年起）")
 
         # (b) 「20XX年…目标/指引/展望」指向了已经结束的年度
         for mm in list(TARGET_AFTER_RE.finditer(s)) + list(TARGET_BEFORE_RE.finditer(s)):
             yr = int(mm.group(1) or mm.group(2))
             if year is not None and yr <= year:
                 add(c, "PERIOD_MISMATCH",
-                    f"经营目标/展望的年度为 {yr} 年，未晚于本研报所属年度 {year} 年；"
-                    f"目标类表述应指向尚未结束的年度",
+                    f"经营目标/展望写的是 {yr} 年，未晚于本研报所属年度 {year} 年；"
+                    f"目标类表述指向的是尚未结束的年度，{yr} 年已披露、不能作为目标年度。",
                     {"raw": f"{yr}年", "value": ""},
-                    {"raw": f"应晚于 {year}", "value": ""}, "—")
+                    {"raw": f"应晚于 {year}", "value": ""}, "—",
+                    f"应晚于 {year} 年（如 {year + 1} 年）")
                 break
 
         # (c) 「截至 20XX年X月末」晚于本研报所属年度
         m = CUTOFF_RE.search(s)
         if m and year is not None and int(m.group(1)) > year:
             add(c, "PERIOD_MISMATCH",
-                f"时点表述为 {m.group(0)}，晚于本研报所属年度 {year} 年；"
-                f"截至时点不应出现在报告年度之后",
+                f"时点写的是「{m.group(0)}」，晚于本研报所属年度 {year} 年；"
+                f"「截至……」的时点不可能晚于报告年度，所引金额实际属于 {year} 年末。",
                 {"raw": m.group(0), "value": ""},
-                {"raw": f"≤ {year}年", "value": ""}, "—")
+                {"raw": f"≤ {year}年", "value": ""}, "—",
+                f"{year}年末")
 
     # (d) 正文与全百分号表行的一致性：≥2 个精确相同且 ≥1 个不同 → 表行数值有误
     for c in texts:
@@ -684,10 +750,11 @@ def _intra_report_checks(claims: list[dict]) -> tuple[list[dict], set[str]]:
                 diff_i = next(i for i, (a, b) in enumerate(zip(series, tail)) if a != b)
                 add(row, "VALUE_ERROR",
                     f"正文与表行数值不一致：正文写 {_fmt(series)}，本表行对应列写 "
-                    f"{_fmt(tail)}（{k} 个中 {same} 个完全相同）",
+                    f"{_fmt(tail)}（{k} 个里只有 {same} 个完全相同）；同一组数值出现两个"
+                    f"版本，需以正文/表格的同一口径逐列核对。",
                     {"raw": _fmt(tail), "value": str(tail[diff_i])},
                     {"raw": _fmt(series), "value": str(series[diff_i])},
-                    str(tail[diff_i] - series[diff_i]))
+                    str(tail[diff_i] - series[diff_i]), _num_str(series[diff_i]))
 
     # (e) 正文「同比减少 X%/Y%/Z%」与全百分号表行方向相反、幅度相同 → 方向写错
     for c in texts:
@@ -711,9 +778,11 @@ def _intra_report_checks(claims: list[dict]) -> tuple[list[dict], set[str]]:
                     add(c, "SIGN_ERROR",
                         f"同比方向与预报表行相反：正文写「同比{mm.group(1)}"
                         f"{_fmt(nums)}」，而表行同列数值为 "
-                        f"{_fmt(tail)}（方向相反），方向写错",
+                        f"{_fmt(tail)}（清一色{'正' if all(v > 0 for v in tail) else '负'}值），"
+                        f"正文与表格的方向对不上。",
                         {"raw": f"同比{mm.group(1)}{_fmt(nums)}", "value": ""},
-                        {"raw": _fmt(tail), "value": ""}, "—")
+                        {"raw": _fmt(tail), "value": ""}, "—",
+                        f"同比{'增长' if all(v > 0 for v in tail) else '减少'}{_fmt(nums)}")
                     break
     # 同一 claim 可能同时命中多支规则，去重后只留第一条
     dedup, seen = [], set()
@@ -746,11 +815,12 @@ def _run_detectors(claims: list[dict]) -> tuple[list[dict], set[str]]:
         hit = _selfcheck_row(c)
         if not hit:
             continue
-        cause, reason = hit
+        cause, reason, expected = hit
         results.append(_claim_record(
             CALC_RULE_ID, c, cause, reason,
             {"raw": str(c.get("sentence") or ""), "value": ""},
-            {"raw": "按(新值 ÷ 旧值 − 1)重算", "value": ""}, "—"))
+            {"raw": "按(新值 ÷ 旧值 − 1)重算", "value": ""}, "—",
+            expected=expected))
         flagged.add(c.get("claim_id"))
     results.extend(_unit_consistency(claims))           # RC04 单位口径
     flagged |= {r["claim_id"] for r in results if r["rule_id"] == UNIT_RULE_ID}
@@ -767,6 +837,10 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
     tol_cfg = _load_tolerance()
     profile = tol_cfg["profiles"][TOLERANCE_PROFILE]
     idx = _index_records(records)
+    # 「应为（正确值）」列里金额用哪种量级单位表述：跟该研报**正文**的口径走
+    # （正文习惯写「亿元」，表内才用「百万元」）。正文没有任何金额时退回表内口径。
+    _all_claims = list(claims_by_id.values())
+    report_unit = _text_unit(_all_claims, _doc_unit(_all_claims))
     # 同比基准索引（D2/RC02 用）：records 在整个 check 调用中固定不变，只构建一次。
     # ★ 不要放进下面的 matches 循环里逐条重建——那是 O(条数 × 记录数) 的无谓开销。
     fy = _fy_index(records)
@@ -864,12 +938,20 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
             # 单位写法本身非法（如"亿万元"）。数值即便凑巧接近也不放行——
             # 这正是"单位错误"这一类要抓的东西，不能因为数值误差在容差内就判通过。
             ok, cause = False, "UNIT_SCALE"
-            reason = f"单位写法非法：{fig['bad_unit']}"
+            # 「应为」＝数字不动、把单位换成该研报正文常用的量级单位写法
+            m_num = re.match(r"-?\d[\d,]*(?:\.\d+)?", str(fig.get("num_raw") or ""))
+            expected = f"{m_num.group(0)}{report_unit}" if m_num else "—"
+            reason = (f"单位写法有误：研报把金额写成「{fig['num_raw']}」，而"
+                      f"「{fig['bad_unit']}」不是常用的量级单位写法（常用：万元 / 百万元 / "
+                      f"亿元）。数字本身没错，只把单位改成「{report_unit}」，即应为"
+                      f"「{expected}」。")
         elif period_year is not None and not str(period).startswith(period_year):
             if value_ok:
                 ok, cause = False, "PERIOD_MISMATCH"
-                reason = (f"期间不符：研报表述为 {period_year} 年，财报取值期间为 {period}；"
-                          f"金额本身一致（{truth}）")
+                expected = f"{period_year}年（与财报取值期间 {period} 一致）"
+                reason = (f"期间写错：研报表述为 {period_year} 年，而金额取自财报的 "
+                          f"{period} 期间（金额本身一致）——期写错、数却对，属期间张冠李戴。"
+                          f"应写作 {period_year} 年。")
             else:
                 skipped.append({**base, "status": "REVIEW",
                                 "reason": f"研报表述期间为 {period_year} 年，与匹配期间 "
@@ -878,8 +960,11 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
                 continue
         else:
             ok = value_ok
+            expected = (_amount_in_unit(truth, report_unit) if code not in RATIO_CODES
+                        else f"{_num_str(truth)}%")
             cause, reason = ("", "") if ok else classify_diff(fig["value"], truth)
             if not ok:
+                reason = f"{reason}。财报口径该期间的正确值为 {expected}"
                 # 口径互认：换另一净利率口径复核一次（见 MARGIN_ALT）。研报口语的
                 # "净利率"常写归母口径，与主口径（净利润÷营业总收入）本就不同值——
                 # 差异属列报口径不同，不是引用错误，判 PASS 并注明依据。
@@ -890,6 +975,8 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
                     truth = alt
                     diff = fig["value"] - truth
                     tol = tolerance_for(profile, fig["value"], truth)
+                    expected = (_amount_in_unit(truth, report_unit)
+                                if code not in RATIO_CODES else f"{_num_str(truth)}%")
                     reason = (f"口径差异：研报表述与「{MARGIN_ZH[MARGIN_ALT[code]]}」"
                               f"一致（{truth}），非引用错误")
 
@@ -904,6 +991,7 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
             "severity": "MED" if ok else "HIGH",
             "cause": cause,
             "reason": reason,
+            "expected": expected,
             "matched_text": fig["raw"],
             "truth_page": recs[0].get("page"),
             "truth_chunk_id": recs[0].get("chunk_id"),
@@ -948,12 +1036,16 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
                                 and abs(abs(yoy_val) - abs(truth_yoy)) <= yoy_tol):
                             results.append({**yoy_base, "status": "FAIL", "severity": "HIGH",
                                             "cause": "SIGN_ERROR",
-                                            "reason": f"同比方向错误：研报为 {yoy_raw}，"
-                                                      f"财报口径同比为 {truth_yoy}%"})
+                                            "reason": f"同比方向写反：研报写「{yoy_raw}」，"
+                                                      f"而按财报数据算得的同比为 "
+                                                      f"{truth_yoy}%——幅度对得上，正负号相反，"
+                                                      f"应写作 {truth_yoy}%。",
+                                            "expected": f"{_num_str(truth_yoy)}%"})
                         else:
                             skipped.append({**yoy_base, "status": "REVIEW",
                                             "reason": f"研报同比 {yoy_raw} 与财报口径同比 "
-                                                      f"{truth_yoy}% 不符，需人工复核"})
+                                                      f"{truth_yoy}% 不符，需人工复核",
+                                            "expected": f"{_num_str(truth_yoy)}%"})
 
     # ── 收尾去重（与函数开头那段说明配套）────────────────────────────────────────
     # ① 检测器（RC03/RC04/RC05）与 RC01/RC02 对**同一 claim、同一 cause** 只留一条：

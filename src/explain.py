@@ -34,7 +34,9 @@ def _diff_desc(r: dict) -> str:
       VALUE_ERROR。差异若不在数值上，就要如实说"差异不在数值上"。
     """
     reason = r.get("reason") or ""
-    if "单位写法非法" in reason:
+    # 单位写法类问题（cause=UNIT_SCALE；文案曾为"单位写法非法"，现为"单位写法有误"）
+    # 差异不在数值上——必须如实这么描述，否则会把模型的注意力引到数值上。
+    if r.get("cause") == "UNIT_SCALE" or "单位写法" in reason:
         return "两者的数值本身接近，差异不在数值大小上，而在其余表述上"
     try:
         d, t = abs(Decimal(str(r.get("diff")))), Decimal(str(r.get("tolerance") or "0"))
