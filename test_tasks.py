@@ -682,11 +682,16 @@ def test_malformed_unit_is_flagged():
 
 
 def test_research_check_flags_unit_error_against_real_value():
-    """用真实财报值验证：862.3亿万元的单位错误必须判 FAIL/UNIT_SCALE。"""
+    """用真实财报值验证：862.3亿万元的单位错误必须判 FAIL/UNIT_SCALE。
+
+    该句由研报内检测器 RC04（单位口径）判定；claim_id 一旦判定，就不再走 RC01，
+    故结果恰好 1 条（避免同一处植错被记成两条）。
+    """
     from src.research_check import check
     matches = [{"claim_id": "c1", "item_code": "NP_PARENT", "period": "2024",
                 "evidence": {"verified": True}}]
-    claims = {"c1": {"sentence": "归母净利润 862.3 亿万元/同比+15.38%"}}
+    claims = {"c1": {"claim_id": "c1",
+                     "sentence": "归母净利润 862.3 亿万元/同比+15.38%"}}
     records = [{"item_code": "NP_PARENT", "period": "2024", "period_type": "FY",
                 "value": "86228146421.62", "page": 64, "chunk_id": "p064_t1"}]
     out = check(matches, claims, records)
@@ -872,6 +877,118 @@ def test_research_check_yoy_not_applied_to_quarter_or_ratio():
     ]
     out = check(r_matches, r_claims, r_records)
     assert [r["rule_id"] for r in out["results"]] == ["RC01@v1.0"]
+
+
+def _row(sentence: str, cid: str, kind: str = "TABLE_ROW") -> dict:
+    return {"claim_id": cid, "kind": kind, "source": "研报.docx",
+            "section": "表1", "page": 1, "row_no": 2, "sentence": sentence}
+
+
+def test_intra_detectors_flag_calc_error_rc03():
+    """RC03 表内自校验：调整幅度列 ≠ (新值÷旧值−1) → FAIL/VALUE_ERROR。
+
+    回归背景（2024 批·标准答案错误5）：营业收入 2026E 调整幅度真值 2.6% 被写成 1.6%。
+    """
+    from src.research_check import _run_detectors
+    claims = [_row("营业收入（百万元） | 174,144 | 187,750 | 201,721 | "
+                   "190,754 | 207,065 | 1.6% | 1.6%", "r2024_t02_02")]
+    results, flagged = _run_detectors(claims)
+    rc03 = [r for r in results if r["rule_id"].startswith("RC03")]
+    assert rc03 and rc03[0]["status"] == "FAIL" and rc03[0]["cause"] == "VALUE_ERROR"
+    assert "r2024_t02_02" in flagged
+
+
+def test_intra_detectors_flag_calc_sign_error_rc03():
+    """RC03：调整幅度符号与「(新值÷旧值−1)」相反 → FAIL/SIGN_ERROR。
+
+    回归背景（2025 批·标准答案错误5）：归母净利润 2026E 调整幅度真值 −5.4% 被写成 +5.4%。
+    """
+    from src.research_check import _run_detectors
+    claims = [_row("归母净利润（百万元） | 82,320 | 89,512 | 91,425 | "
+                   "84,658 | 90,356 | +5.4% | -1.2%", "r2025_t02_06")]
+    results, _ = _run_detectors(claims)
+    rc03 = [r for r in results if r["rule_id"].startswith("RC03")]
+    assert rc03 and rc03[0]["cause"] == "SIGN_ERROR"
+
+
+def test_intra_detectors_flag_unit_inconsistency_rc04():
+    """RC04：报表行标签单位与文档统一口径不一致 → FAIL/UNIT_SCALE。
+
+    回归背景（2026H1 批·标准答案错误1）：其余行标「(百万元)」，净利润行被改成「(千万元)」。
+    """
+    from src.research_check import _run_detectors
+    claims = [
+        _row("营业收入(百万元) | 174,144 | 172,054", "t01_01", "TABLE_LABEL"),
+        _row("净利润(千万元) | 86228 | 82320 | 82367", "t01_03", "TABLE_LABEL"),
+        _row("归母净利润(百万元) | 82320 | 84658", "t01_05", "TABLE_LABEL"),
+    ]
+    results, flagged = _run_detectors(claims)
+    rc04 = [r for r in results if r["rule_id"].startswith("RC04")]
+    assert rc04 and rc04[0]["claim_id"] == "t01_03"
+    assert rc04[0]["cause"] == "UNIT_SCALE" and "t01_03" in flagged
+
+
+def test_intra_detectors_flag_forecast_range_start_rc05():
+    """RC05：预测年份区间起点 ≤ 报告年度 → FAIL/PERIOD_MISMATCH。
+
+    回归背景（2026H1 批·标准答案错误2）：真值「预计 2026-2028 年」被写成 2025-2027 年。
+    """
+    from src.research_check import _run_detectors
+    claims = [{"claim_id": "r2026_p08_015", "kind": "TEXT", "source": "研报.docx",
+               "section": "核心观点", "page": 1, "para_no": 5,
+               "sentence": "我们预计 2025-2027 年公司实现营业总收入 1733/1838/1993 亿元。"}]
+    results, flagged = _run_detectors(claims)
+    rc05 = [r for r in results if r["rule_id"].startswith("RC05")]
+    assert rc05 and rc05[0]["cause"] == "PERIOD_MISMATCH"
+    assert "r2026_p08_015" in flagged
+
+
+def test_intra_detectors_flag_sign_series_rc05():
+    """RC05：正文「同比减少X%/Y%/Z%」与表行同列全正值 → FAIL/SIGN_ERROR。
+
+    回归背景（2026H1 批·标准答案错误4）：真值「同比增长0.7%/6.0%/8.5%」被写成「减少」。
+    """
+    from src.research_check import _run_detectors
+    claims = [
+        {"claim_id": "p08_015", "kind": "TEXT", "source": "研报.docx",
+         "section": "核心观点", "page": 1, "para_no": 5,
+         "sentence": "预计 2026-2028 年公司实现营业总收入 1733/1838/1993 亿元，"
+                     "同比减少0.7%/6.0%/8.5%；"},
+        _row("(+/-%) | 15.7% | -1.2% | 0.7% | 6.0% | 8.5%", "t01_02"),
+    ]
+    results, _ = _run_detectors(claims)
+    rc05 = [r for r in results if r["rule_id"].startswith("RC05")]
+    assert any(r["cause"] == "SIGN_ERROR" for r in rc05)
+
+
+def test_intra_detectors_flag_text_vs_row_value_rc05():
+    """RC05：正文数值序列与全百分号表行同列「多数相同、个别不同」→ FAIL/VALUE_ERROR。
+
+    回归背景（2026H1 批·标准答案错误5）：净利润增长率 2026E 真值 0.1% 被写成 0.2%。
+    """
+    from src.research_check import _run_detectors
+    claims = [
+        {"claim_id": "p_x", "kind": "TEXT", "source": "研报.docx",
+         "section": "核心观点", "page": 1,
+         "sentence": "净利润增长0.1%/7.6%/9.7%，增速平稳。"},
+        _row("净利润增长率 | 15.4% | -4.5% | 0.2% | 7.6% | 9.7%", "t05_33"),
+    ]
+    results, _ = _run_detectors(claims)
+    rc05 = [r for r in results if r["rule_id"].startswith("RC05")]
+    hit = [r for r in rc05 if r["cause"] == "VALUE_ERROR"]
+    assert hit and hit[0]["claim_id"] == "t05_33"
+
+
+def test_intra_detector_fail_is_not_duplicated_in_review():
+    """检测器已判 FAIL 的 claim 不得再被 RC01 流程记成一条「待复核」。"""
+    from src.research_check import check
+    claims = {"c1": {"claim_id": "c1", "kind": "TEXT",
+                     "sentence": "归母净利润 862.3 亿万元/同比+15.38%"}}
+    matches = [{"claim_id": "c1", "item_code": "NP_PARENT", "period": "2024",
+                "evidence": {}}]
+    out = check(matches, claims, [])
+    assert [r["status"] for r in out["results"]] == ["FAIL"]
+    assert out["review"] == []
 
 
 def test_yoy_truth_rejects_non_fy_period():
@@ -2333,20 +2450,20 @@ def test_research_check_records_unmatched_claims_as_review():
     shutil.rmtree(base, ignore_errors=True)
     base.mkdir(parents=True)
     (base / "claims.json").write_text(json.dumps([
-        {"claim_id": "a::1", "sentence": "归母净利润 862.3 亿万元",
+        {"claim_id": "a::1", "sentence": "归母净利润 862.3 亿元",
          "section": "核心观点", "source": "模拟研究报告.docx"},
     ], ensure_ascii=False), encoding="utf-8")
     try:
         out = run_research_check(f"runs/{run_id}/claims.json", [], [], run_id,
                                  unmatched=[{"claim_id": "a::1",
                                              "reason": "模型未返回该条的匹配结果",
-                                             "sentence": "归母净利润 862.3 亿万元"}])
+                                             "sentence": "归母净利润 862.3 亿元"}])
         assert out["results"] == []
         assert len(out["review"]) == 1
         item = out["review"][0]
         assert item["status"] == "REVIEW" and item["dimension"] == "C研"
         assert item["claim_id"] == "a::1"
-        assert "862.3 亿万元" in item["evidence"]["sentence"]
+        assert "862.3 亿元" in item["evidence"]["sentence"]
         saved = json.loads((base / "rules" / "research_claims.json").read_text(encoding="utf-8"))
         assert len(saved["review"]) == 1 and saved["results"] == []
     finally:

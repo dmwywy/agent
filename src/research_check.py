@@ -182,7 +182,15 @@ def yoy_tolerance(truth: Decimal) -> Decimal:
 
 
 PERIOD_YEAR_RE = re.compile(r"(20\d{2})\s*年")
-YOY_TOKEN_RE = re.compile(r"(?:同比\s*)?([+\-])\s*(\d[\d,]*(?:\.\d+)?)\s*%")
+# 同比方向既可能写成符号（同比+1.2% / 同比-1.2%），也可能写成中文词
+# （同比增加1.2% / 同比减少1.2%）。只认符号会把中文写法整类漏掉。
+YOY_DOWN_WORDS = ("减少", "下降", "降低", "下滑", "回落")
+YOY_UP_WORDS = ("增加", "增长", "上升", "提升")
+YOY_TOKEN_RE = re.compile(
+    r"(?:同比\s*)?(?:"
+    r"([+\-])\s*(\d[\d,]*(?:\.\d+)?)"
+    r"|(" + "|".join(YOY_DOWN_WORDS + YOY_UP_WORDS) + r")\s*(\d[\d,]*(?:\.\d+)?)"
+    r")\s*%")
 YOY_WINDOW = 15               # "同比±X%"必须紧跟在数值之后，超出窗口就不认（避免挂到别的指标）
 
 
@@ -209,11 +217,16 @@ def yoy_after(sentence: str, fig: dict) -> tuple[Decimal, str] | None:
     if not m:
         return None
     try:
-        val = Decimal(m.group(2).replace(",", ""))
+        if m.group(1) is not None:                      # 符号写法：同比+1.2%
+            val = Decimal(m.group(2).replace(",", ""))
+            if m.group(1) == "-":
+                val = -val
+        else:                                           # 中文写法：同比减少1.2%
+            val = Decimal(m.group(4).replace(",", ""))
+            if m.group(3) in YOY_DOWN_WORDS:
+                val = -val
     except InvalidOperation:
         return None
-    if m.group(1) == "-":
-        val = -val
     return val, seg[:m.end()]
 
 
@@ -366,6 +379,356 @@ def classify_diff(claim_val: Decimal, truth: Decimal) -> tuple[str, str]:
     return "VALUE_ERROR", f"研报值 / 财报值 = {ratio:.4f}，非 10 的整数次幂"
 
 
+# ---------------------------------------------------------------------------
+# 研报**文档内部**一致性检测器（RC03 / RC04 / RC05）
+#
+# 为什么需要它们：RC01/RC02 是"研报 vs 财报"的比对，一旦财报侧没有对应字段
+# （分产品收入、合同负债、单季数据）或该条引用根本对不上任何科目，核查就会以
+# "待人工复核"收尾——清单里植的"计算错误 / 单位错误 / 期间错误 / 同比方向错误"
+# 大多属于这一类。这三个检测器只读研报自身（claim 里已带页码/段号/表行号），
+# 因此**离线也必然可执行**，且完全不依赖模型输出，可复现、可逐条复核。
+# ---------------------------------------------------------------------------
+CALC_RULE_ID = "RC03@v1.0"      # 表内自校验：调整幅度列应与其数据列自洽
+UNIT_RULE_ID = "RC04@v1.0"      # 单位口径：表行标签单位 vs 文档统一口径
+INTRA_RULE_ID = "RC05@v1.0"     # 研报内一致性：预测年份/数值/方向 与表头表行对照
+
+CALC_TOL = Decimal("0.15")      # 自校验容差：列报值保留一位小数时最大舍入误差 ≈0.05
+
+# 数值 + 可选百分号/pcts 后缀（供表行按序取值）
+TOKEN_RE = re.compile(r"(-?\d[\d,]*(?:\.\d+)?)\s*(%|pcts?)?")
+# 表格行标签里的括号单位，如「净利润(千万元)」「营业收入（百万元）」
+PAREN_UNIT_RE = re.compile(r"[（(]\s*([^）)]{0,8}?元)\s*[）)]")
+# 报表行标签白名单：只有这些行的单位才与文档口径比较（「每股收益（元）」等排除在外）
+STATEMENT_PREFIXES = (
+    "营业总收入", "营业收入", "净利润", "归母净利润", "营业成本", "营业利润",
+    "利润总额", "资产总计", "负债合计", "所有者权益合计", "货币资金", "应收账款",
+    "存货", "固定资产", "在建工程", "短期借款", "长期借款", "应付账款", "合同负债",
+    "经营活动产生的现金流量净额", "经营活动现金流量净额", "研发费用", "销售费用",
+    "管理费用", "财务费用", "税金及附加",
+)
+# 只有"量级单位"参与口径比对：每股收益的"元"、比率类的"%"天然不同于报表口径
+MAGNITUDE_UNITS = ("万亿", "亿", "亿元", "百万元", "千万元", "万元", "万元")
+# 预测区间「2025-2027 年」（起点/终点年份）
+RANGE_RE = re.compile(r"(20\d{2})\s*[-–—~～至]\s*(20\d{2})\s*年")
+# 「20XX年…目标/指引/展望」（经营目标只会指向**尚未结束**的年度）
+TARGET_AFTER_RE = re.compile(r"(20\d{2})\s*年[^。；，、！？]{0,10}?(?:目标|指引|展望)")
+TARGET_BEFORE_RE = re.compile(r"(?:目标|指引|展望)[^。；，、！？]{0,10}?(20\d{2})\s*年")
+# 「截至 20XX年X月末」：年报里出现**晚于报告年度**的时点即期间张冠李戴
+CUTOFF_RE = re.compile(r"(20\d{2})\s*年\s*\d{1,2}\s*月[末底]?")
+# 句内百分号序列（顺序保留），供 RC05(b)(c) 与表行对照
+SERIES_PCT_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*%")
+# 「同比(增长|减少)X%/Y%/Z%」方向词 + 连续百分号序列
+SIGN_SERIES_RE = re.compile(
+    r"(增加|增长|上升|提升|减少|下降|降低|下滑|回落)\s*"
+    r"((?:\d[\d,]*(?:\.\d+)?\s*%\s*[/、,和及]?\s*){2,})")
+
+
+def _report_year(claim_id: str) -> int | None:
+    """从 claim_id 里取报告所属年度（`r2024_p04_002` / `2025_xx::r2025_...`）。"""
+    m = re.search(r"(20\d{2})", str(claim_id or ""))
+    return int(m.group(1)) if m else None
+
+
+def _claim_record(rule_id: str, claim: dict, cause: str, reason: str,
+                  left: dict, right: dict, diff: str) -> dict:
+    """检测器产出的结果条目：字段与 RC01 保持一致，另带**位置**（页码/段落/表行）。"""
+    return {
+        "rule_id": rule_id, "dimension": "C研", "claim_id": claim.get("claim_id"),
+        "item_code": None, "period": None, "status": "FAIL",
+        "left": {"source": "research_report", **left},
+        "right": {"source": "research_report", **right},
+        "diff": diff, "tolerance": None, "severity": "HIGH",
+        "cause": cause, "reason": reason,
+        "evidence": {
+            "file": claim.get("source"), "section": claim.get("section"),
+            "sentence": claim.get("sentence"), "page": claim.get("page"),
+            "para_no": claim.get("para_no"), "row_no": claim.get("row_no"),
+            "caption": claim.get("caption"), "verified": True,
+        },
+    }
+
+
+def _tokens(sentence: str) -> list[tuple[Decimal, str]]:
+    """表行按出现顺序取值 → [(数值, 单位标记)]；单位标记为 '%'/'pct' 或 ''。"""
+    line = re.sub(r",\s+", ",", sentence or "")       # 「174, 144」→「174,144」
+    out: list[tuple[Decimal, str]] = []
+    for m in TOKEN_RE.finditer(line):
+        try:
+            out.append((Decimal(m.group(1).replace(",", "")), (m.group(2) or "").lower()))
+        except InvalidOperation:
+            continue
+    return out
+
+
+def _pct_row_values(claim: dict) -> list[Decimal] | None:
+    """全百分号表行（每个数据格都是 X%）→ 数值序列；否则 None。
+
+    只认"标签格 + 清一色百分号数据格"的行：预测调整表那种
+    「营业收入（百万元）| … | 1.6% | 1.6%」的混合行不参与，避免把
+    「调整幅度」当成长率去和正文的百分比序列对照。
+    """
+    if claim.get("kind") != "TABLE_ROW":
+        return None
+    cells = [c.strip() for c in str(claim.get("sentence") or "").split("|")]
+    if len(cells) < 3:
+        return None
+    vals: list[Decimal] = []
+    for c in cells[1:]:
+        m = re.fullmatch(r"([+\-]?\d[\d,]*(?:\.\d+)?)\s*%", c)
+        if not m:
+            return None
+        try:
+            vals.append(Decimal(m.group(1).replace(",", "")))
+        except InvalidOperation:
+            return None
+    return vals or None
+
+
+def _selfcheck_row(claim: dict) -> tuple[str, str] | None:
+    """RC03：调整表的"调整幅度"列是否与其数据列自洽 → (cause, reason) 或 None。
+
+    形态：`营业收入（百万元） | 旧2026E | 旧2027E | 新2026E | 新2027E | 幅度2026E | 幅度2027E`
+    幅度应由 (新 ÷ 旧 − 1) × 100 得到。末 k 个百分号即 k 个幅度，其前 2k 个数值
+    恰好是「旧 k 个」与「新 k 个」。符号相反而幅度相当 → 方向写错；幅度不符 → 数值错。
+    """
+    toks = _tokens(str(claim.get("sentence") or ""))
+    pcts = [t for t in toks if t[1]]
+    plains = [t for t in toks if not t[1]]
+    k = len(pcts)
+    if k < 1 or len(plains) < 2 * k:
+        return None
+    if not all(t[1] for t in toks[-k:]):              # 幅度列必须在行尾（成块）
+        return None
+    prev = [v for v, _ in plains[-2 * k:-k]]
+    post = [v for v, _ in plains[-k:]]
+    exp = [v for v, _ in pcts[-k:]]
+    if any(v <= 0 for v in prev + post):              # 负值/零值指标不适用本式
+        return None
+    if any(not (0 < abs(e) <= 50) for e in exp):      # 幅度列应是百分比量级
+        return None
+    sign_bad, value_bad = [], []
+    for a, b, e in zip(prev, post, exp):
+        calc = (b / a - 1) * 100
+        if abs(calc) > Decimal("50"):                 # 真实幅度过大 → 不是这一形态
+            return None
+        if (calc > 0) != (e > 0) and abs(abs(calc) - abs(e)) <= CALC_TOL:
+            sign_bad.append((e, calc))
+        elif abs(calc - e) > CALC_TOL:
+            value_bad.append((e, calc))
+    if sign_bad:
+        e, calc = sign_bad[0]
+        return ("SIGN_ERROR",
+                f"表内自校验：调整幅度 {e}% 的符号与「(新值 ÷ 旧值 − 1)」算得的 "
+                f"{calc:.2f}% 相反，方向写错")
+    if value_bad:
+        e, calc = value_bad[0]
+        return ("VALUE_ERROR",
+                f"表内自校验：调整幅度列写 {e}%，但按「(新值 ÷ 旧值 − 1)」应为 "
+                f"{calc.quantize(Decimal('0.1'))}%（数据列与幅度列不自洽）")
+    return None
+
+
+def _doc_unit(claims: list[dict]) -> str | None:
+    """文档统一列报单位：报表类表行标签括号内出现最多的量级单位。"""
+    tally: dict[str, int] = {}
+    for c in claims:
+        if c.get("kind") not in ("TABLE_LABEL", "TABLE_ROW", "TABLE_HEADER"):
+            continue
+        m = PAREN_UNIT_RE.search(str(c.get("sentence") or "").split("|")[0])
+        if m and m.group(1) in MAGNITUDE_UNITS:
+            tally[m.group(1)] = tally.get(m.group(1), 0) + 1
+    if not tally:
+        return None
+    return max(tally.items(), key=lambda kv: kv[1])[0]
+
+
+def _unit_consistency(claims: list[dict]) -> list[dict]:
+    """RC04：① 表行标签单位与文档统一口径不一致；② 正文数值用了非量级单位写法。"""
+    out, seen = [], set()
+    doc_unit = _doc_unit(claims)
+    for c in claims:
+        cid = c.get("claim_id")
+        s = str(c.get("sentence") or "")
+        if c.get("kind") in ("TABLE_LABEL", "TABLE_ROW", "TABLE_HEADER"):
+            label = s.split("|")[0].strip()
+            m = PAREN_UNIT_RE.search(label)
+            if (not m or doc_unit is None):
+                continue
+            unit = m.group(1)
+            if unit not in MAGNITUDE_UNITS or unit == doc_unit:
+                continue
+            prefix = label[:m.start()].strip()
+            if not any(prefix.startswith(p) for p in STATEMENT_PREFIXES):
+                continue                          # 每股收益（元）等非报表口径行
+            out.append(_claim_record(
+                UNIT_RULE_ID, c, "UNIT_SCALE",
+                f"单位口径不一致：本行标签标注「{unit}」，而本研报其余报表行统一为"
+                f"「{doc_unit}」，同一份研报内单位混用",
+                {"raw": label, "value": ""}, {"raw": doc_unit, "value": ""},
+                f"{unit} ≠ {doc_unit}"))
+            seen.add(cid)
+        else:
+            # 正文里的畸形/非本口径单位（如「862.3 亿万元」「1721 千万元」）。
+            # ★ 必须遍历句中**全部**数值再判：同句常先出现一个合法单位（1741.4 亿元），
+            #   只看第一个匹配（.search）会把紧随其后的畸形单位整条漏掉。
+            bad = next((m for m in NUM_RE.finditer(s) if m.group(3) not in UNIT_SCALE), None)
+            if bad is None or cid in seen:
+                continue
+            out.append(_claim_record(
+                UNIT_RULE_ID, c, "UNIT_SCALE",
+                f"单位写法不属于本系统认可的量级单位：{bad.group(3)}"
+                f"（{bad.group(2)}{bad.group(3)}）",
+                {"raw": bad.group(2) + bad.group(3), "value": ""},
+                {"raw": "/".join(UNIT_SCALE), "value": ""}, "—"))
+            seen.add(cid)
+    return out
+
+
+def _intra_report_checks(claims: list[dict]) -> tuple[list[dict], set[str]]:
+    """RC05：研报自身的一致性（预测区间 / 同比方向 / 正文与表行数值）。"""
+    out: list[dict] = []
+    flagged: set[str] = set()
+    texts = [c for c in claims if c.get("kind") == "TEXT"]
+    rows = [c for c in claims if c.get("kind") == "TABLE_ROW"]
+    all_pct_rows = [(c, _pct_row_values(c)) for c in rows]
+    all_pct_rows = [(c, v) for c, v in all_pct_rows if v]
+
+    def add(claim, cause, reason, left, right, diff):
+        out.append(_claim_record(INTRA_RULE_ID, claim, cause, reason, left, right, diff))
+        flagged.add(claim.get("claim_id"))
+
+    for c in texts:
+        cid = c.get("claim_id")
+        s = str(c.get("sentence") or "")
+        year = _report_year(cid)
+
+        # (a) 预测年份区间必须自报告年度**之后**起算。
+        #   研报的"预计/预测"指向尚未结束的年度，区间起点不应 ≤ 报告年度
+        #   （2026 中报写"预计 2025-2027 年"即含已披露的 2025，属期间张冠李戴）。
+        #   ★ 不能拿"区间年份集合 ≠ 表头 E 年份集合"来判：表头常列 4 个预测年
+        #   （2025E~2028E）而正文只前瞻 3 年，集合天然不等，会产出大量误报。
+        m = RANGE_RE.search(s)
+        if m and year is not None and FORECAST_MARKER_RE.search(s):
+            y1, y2 = int(m.group(1)), int(m.group(2))
+            if y1 <= year and y2 - y1 <= 6:
+                add(c, "PERIOD_MISMATCH",
+                    f"预测年份区间起点为 {y1} 年，不晚于本研报所属年度 {year} 年；"
+                    f"向前的预测区间应自 {year} 年之后起算（正文写 {y1}-{y2} 年）",
+                    {"raw": f"{y1}-{y2}年", "value": ""},
+                    {"raw": f"起点应 > {year}", "value": ""}, "—")
+
+        # (b) 「20XX年…目标/指引/展望」指向了已经结束的年度
+        for mm in list(TARGET_AFTER_RE.finditer(s)) + list(TARGET_BEFORE_RE.finditer(s)):
+            yr = int(mm.group(1) or mm.group(2))
+            if year is not None and yr <= year:
+                add(c, "PERIOD_MISMATCH",
+                    f"经营目标/展望的年度为 {yr} 年，未晚于本研报所属年度 {year} 年；"
+                    f"目标类表述应指向尚未结束的年度",
+                    {"raw": f"{yr}年", "value": ""},
+                    {"raw": f"应晚于 {year}", "value": ""}, "—")
+                break
+
+        # (c) 「截至 20XX年X月末」晚于本研报所属年度
+        m = CUTOFF_RE.search(s)
+        if m and year is not None and int(m.group(1)) > year:
+            add(c, "PERIOD_MISMATCH",
+                f"时点表述为 {m.group(0)}，晚于本研报所属年度 {year} 年；"
+                f"截至时点不应出现在报告年度之后",
+                {"raw": m.group(0), "value": ""},
+                {"raw": f"≤ {year}年", "value": ""}, "—")
+
+    # (d) 正文与全百分号表行的一致性：≥2 个精确相同且 ≥1 个不同 → 表行数值有误
+    for c in texts:
+        s = str(c.get("sentence") or "")
+        series = [Decimal(x.replace(",", "")) for x in SERIES_PCT_RE.findall(s)]
+        if len(series) < 2:
+            continue
+        k = len(series)
+        for row, vals in all_pct_rows:
+            if len(vals) < k:
+                continue
+            tail = vals[-k:]
+            same = sum(1 for a, b in zip(series, tail) if a == b)
+            if same >= 2 and same < k:
+                diff_i = next(i for i, (a, b) in enumerate(zip(series, tail)) if a != b)
+                add(row, "VALUE_ERROR",
+                    f"正文与表行数值不一致：正文写 {_fmt(series)}，本表行对应列写 "
+                    f"{_fmt(tail)}（{k} 个中 {same} 个完全相同）",
+                    {"raw": _fmt(tail), "value": str(tail[diff_i])},
+                    {"raw": _fmt(series), "value": str(series[diff_i])},
+                    str(tail[diff_i] - series[diff_i]))
+
+    # (e) 正文「同比减少 X%/Y%/Z%」与全百分号表行方向相反、幅度相同 → 方向写错
+    for c in texts:
+        s = str(c.get("sentence") or "")
+        for mm in SIGN_SERIES_RE.finditer(s):
+            down = mm.group(1) in YOY_DOWN_WORDS
+            nums = [Decimal(x.replace(",", ""))
+                    for x in re.findall(r"\d[\d,]*(?:\.\d+)?", mm.group(2))]
+            if len(nums) < 2:
+                continue
+            k = len(nums)
+            for row, vals in all_pct_rows:
+                if len(vals) < k:
+                    continue
+                tail = vals[-k:]
+                # 方向一致才不是本类问题：正文说"减少"(down=True) 应对应全负值
+                # （all(v>0)=False），说"增长"(down=False) 应对应全正值。
+                if down != all(v > 0 for v in tail):
+                    continue
+                if all(a == b for a, b in zip(nums, tail)):
+                    add(c, "SIGN_ERROR",
+                        f"同比方向与预报表行相反：正文写「同比{mm.group(1)}"
+                        f"{_fmt(nums)}」，而表行同列数值为 "
+                        f"{_fmt(tail)}（方向相反），方向写错",
+                        {"raw": f"同比{mm.group(1)}{_fmt(nums)}", "value": ""},
+                        {"raw": _fmt(tail), "value": ""}, "—")
+                    break
+    # 同一 claim 可能同时命中多支规则，去重后只留第一条
+    dedup, seen = [], set()
+    for r in out:
+        key = (r["claim_id"], r["cause"])
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(r)
+    return dedup, flagged
+
+
+def _fmt(vals) -> str:
+    """数值序列 → 逗号分隔的显示串（**返回字符串**：报告表格单元格必须是文本，
+    返回 list 会被 reportlab 当成"多个 flowable"而在渲染时报 wrapOn 错误）。"""
+    out = []
+    for v in vals:
+        d = Decimal(v)
+        out.append(f"{d.normalize():f}" if d == d.to_integral_value() else f"{d:f}")
+    return ", ".join(out)
+
+
+def _run_detectors(claims: list[dict]) -> tuple[list[dict], set[str]]:
+    """跑全部研报内检测器，返回 (结果条目, 已判定的 claim_id 集合)。"""
+    results: list[dict] = []
+    flagged: set[str] = set()
+    for c in claims:                                    # RC03 表内自校验
+        if c.get("kind") != "TABLE_ROW":
+            continue
+        hit = _selfcheck_row(c)
+        if not hit:
+            continue
+        cause, reason = hit
+        results.append(_claim_record(
+            CALC_RULE_ID, c, cause, reason,
+            {"raw": str(c.get("sentence") or ""), "value": ""},
+            {"raw": "按(新值 ÷ 旧值 − 1)重算", "value": ""}, "—"))
+        flagged.add(c.get("claim_id"))
+    results.extend(_unit_consistency(claims))           # RC04 单位口径
+    flagged |= {r["claim_id"] for r in results if r["rule_id"] == UNIT_RULE_ID}
+    intra, intra_ids = _intra_report_checks(claims)     # RC05 研报内一致性
+    results.extend(intra)
+    flagged |= intra_ids
+    return results, flagged
+
+
 def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
     """对每条已匹配的 claim 做数值比对，返回 interfaces.md §4.1 形态的结果。"""
     fields = _load_fields()
@@ -374,9 +737,16 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
     profile = tol_cfg["profiles"][TOLERANCE_PROFILE]
     idx = _index_records(records)
 
-    results, skipped = [], []
+    # 先跑"研报内一致性"检测器（RC03/RC04/RC05）：它们只读研报自身，不依赖财报字段
+    # 与模型输出。已判定的 claim 不再进下面的 RC01/RC02 流程，避免同一处植错被记成
+    # 两条（一条 FAIL + 一条语焉不详的 REVIEW）。
+    det_results, det_fail_ids = _run_detectors(list(claims_by_id.values()))
+
+    results, skipped = list(det_results), []
     for m in matches:
         cid, code, period = m.get("claim_id"), m.get("item_code"), m.get("period")
+        if cid in det_fail_ids:
+            continue
         base = {"rule_id": RULE_ID, "dimension": "C研", "claim_id": cid,
                 "item_code": code, "period": period,
                 "evidence": m.get("evidence", {})}
@@ -583,15 +953,25 @@ def run_research_check(claims_path: str, matches: list[dict],
     claims = json.loads((ROOT / claims_path).read_text(encoding="utf-8"))
     by_id = {c["claim_id"]: c for c in claims}
     out = check(matches, by_id, records)
+    # 已被研报内检测器（RC03/RC04/RC05）判定为异常的 claim，不再重复记为「待复核」：
+    # 同一处植错若既进 FAIL 又进 REVIEW，异常计数会翻倍、复核清单也会出现伪条目。
+    decided = {r.get("claim_id") for r in out["results"]}
     for u in unmatched or []:
-        c = by_id.get(u.get("claim_id")) or {}
+        cid = u.get("claim_id")
+        if cid in decided:
+            continue
+        c = by_id.get(cid) or {}
         out["review"].append({
-            "rule_id": RULE_ID, "dimension": "C研", "claim_id": u.get("claim_id"),
+            "rule_id": RULE_ID, "dimension": "C研", "claim_id": cid,
             "item_code": u.get("item_code"), "period": u.get("period"),
             "status": "REVIEW",
             "reason": u.get("reason") or "模型未返回该条的匹配结果",
+            # 位置：页码 + 章节 + 段号 / 表行号 + 表标题（与 RC01 证据口径一致）
             "evidence": {"file": c.get("source"), "section": c.get("section"),
-                         "sentence": u.get("sentence") or c.get("sentence")},
+                         "sentence": u.get("sentence") or c.get("sentence"),
+                         "page": c.get("page"), "para_no": c.get("para_no"),
+                         "row_no": c.get("row_no"), "caption": c.get("caption"),
+                         "verified": bool(c)},
         })
     p = ROOT / "runs" / run_id / "rules" / "research_claims.json"
     p.parent.mkdir(parents=True, exist_ok=True)

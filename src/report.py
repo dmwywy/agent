@@ -347,13 +347,46 @@ def _review_sentence(item: dict) -> str:
     return (item.get("evidence") or {}).get("sentence") or item.get("sentence") or ""
 
 
+def loc_str(ev: dict) -> str:
+    """证据位置（人类可读）：页码 + 章节 + 段号/表行号 + 表标题。
+
+    研报 claim 的证据带 page/section/para_no/row_no/caption；规则侧证据只带 page/locator。
+    ★ 页码是否标注「推定」按证据来源区分：
+      - 研报 claim 来自 docx，没有渲染页码，page 是按分页符**推定**的 → 标注「页码推定」；
+      - 规则侧证据来自年报 PDF，page 是真实页序号 → 照实显示。
+      推定页码与原 PDF 排版可能差 ±1 页，标注出来以免被当成真实页码。
+    """
+    ev = ev or {}
+    from_claim = any(ev.get(k) is not None
+                     for k in ("section", "para_no", "row_no", "caption"))
+    parts: list[str] = []
+    if ev.get("page") is not None:
+        parts.append(f"p{ev['page']}")
+    if ev.get("section"):
+        parts.append(str(ev["section"]))
+    if ev.get("para_no") is not None:
+        parts.append(f"第{ev['para_no']}段")
+    if ev.get("row_no") is not None:
+        parts.append(f"第{ev['row_no']}行")
+    if ev.get("caption"):
+        parts.append(str(ev["caption"]))
+    if not parts:
+        return ev.get("locator") or "—"
+    txt = " · ".join(parts)
+    if from_claim and ev.get("page") is not None:
+        txt += "（页码推定）"
+    return txt
+
+
 def research_review_rows(model: dict) -> list[list[str]]:
-    """研报引用「待人工复核」条目的表格行：(科目, 期间, 原因, 研报原句)。
+    """研报引用「待人工复核」条目的表格行：(科目, 期间, 原因, 研报原句, 位置)。
 
     ★ 只给计数不给明细，评审无从核对到底是哪几句没比对上；报告必须逐条列出。
+    ★ 位置列固定放在末位，不改动前四列的既有下标（报告其它处与测试依赖该顺序）。
     """
     return [[x.get("item_code") or "—", str(x.get("period") or "—"),
-             x.get("reason", ""), _review_sentence(x)]
+             x.get("reason", ""), _review_sentence(x),
+             loc_str(x.get("evidence"))]
             for x in (model.get("research") or {}).get("review") or []]
 
 
@@ -630,7 +663,7 @@ def render_pdf(model: dict, path: Path) -> Path:
     if model["anomalies"]:
         for i, a in enumerate(model["anomalies"], 1):
             ev = a.get("evidence") or {}
-            loc = f"p{ev['page']}" if ev.get("page") is not None else (ev.get("locator") or "—")
+            loc = loc_str(ev)
             story.append(Paragraph(
                 f"<b>异常 {i}｜{a.get('rule_id')}｜{DIM_ZH.get(a.get('dimension',''), a.get('dimension',''))}"
                 f"｜{STATUS_ZH.get(a.get('status'), a.get('status'))}</b>", body))
@@ -649,22 +682,23 @@ def render_pdf(model: dict, path: Path) -> Path:
     if model["research_fail"] or _rv_rows:
         story.append(Paragraph("五、研报引用异常与待人工复核", h2))
         if model["research_fail"]:
-            rows = [["科目", "期间", "研报值", "财报值", "差异", "归因"]]
+            rows = [["科目", "期间", "研报值", "财报值", "差异", "归因", "位置"]]
             for r in model["research_fail"]:
-                rows.append([r.get("item_code", ""), str(r.get("period", "")),
+                rows.append([r.get("item_code") or "—", str(r.get("period") or "—"),
                              (r.get("left") or {}).get("raw", ""),
                              (r.get("right") or {}).get("value", "")[:18],
                              (r.get("diff") or "")[:18],
-                             f"{r.get('cause','')} {r.get('reason','')}"])
-            story.append(tbl(rows, widths=[26 * mm, 20 * mm, 30 * mm, 34 * mm,
-                                           26 * mm, 29 * mm]))
+                             f"{r.get('cause','')} {r.get('reason','')}",
+                             loc_str(r.get("evidence"))])
+            story.append(tbl(rows, widths=[16 * mm, 16 * mm, 24 * mm, 26 * mm,
+                                           16 * mm, 30 * mm, 37 * mm]))
         if _rv_rows:
             story.append(Paragraph(
                 f"待人工复核 {len(_rv_rows)} 条（程序无法自动判定，不代表存在错误）："
                 + "；".join(research_review_reasons(model)), small))
-            rows = [["科目", "期间", "原因", "研报原句"]]
+            rows = [["科目", "期间", "原因", "研报原句", "位置"]]
             rows.extend(_rv_rows)
-            story.append(tbl(rows, widths=[24 * mm, 18 * mm, 62 * mm, 61 * mm]))
+            story.append(tbl(rows, widths=[20 * mm, 16 * mm, 52 * mm, 46 * mm, 31 * mm]))
             story.append(Spacer(1, 5))
 
     # 研报观点 vs 财报数字：成段点评（有研报比对结果时才出现）
@@ -855,9 +889,7 @@ def render_xlsx(model: dict, path: Path) -> Path:
             STATUS_ZH.get(r.get("status"), r.get("status")), r.get("period", ""),
             r.get("expr", ""), r.get("diff"), r.get("tolerance"), r.get("severity"),
             (r.get("evidence") or {}).get("file"),
-            (r.get("evidence") or {}).get("page")
-            if (r.get("evidence") or {}).get("page") is not None
-            else (r.get("evidence") or {}).get("locator"),
+            loc_str(r.get("evidence")),
             (r.get("evidence") or {}).get("raw_text"),
             _suggest(r.get("status"), r.get("dimension", ""), r.get("reason", ""))]
            for r in model["anomalies"]])
@@ -899,20 +931,23 @@ def render_xlsx(model: dict, path: Path) -> Path:
     rc = (model["research"] or {}).get("results", [])
     if rc:
         sheet("研报引用", ["状态", "科目", "期间", "研报原文值", "研报数值", "财报值",
-                           "差异", "容差", "归因", "说明", "研报原句"],
-              [[r.get("status"), r.get("item_code"), r.get("period"),
+                           "差异", "容差", "归因", "说明", "研报原句", "位置"],
+              [[r.get("status"), r.get("item_code") or "—", str(r.get("period") or "—"),
                 (r.get("left") or {}).get("raw"), (r.get("left") or {}).get("value"),
                 (r.get("right") or {}).get("value"), r.get("diff"), r.get("tolerance"),
-                r.get("cause"), r.get("reason"), (r.get("evidence") or {}).get("sentence")]
+                r.get("cause"), r.get("reason"), (r.get("evidence") or {}).get("sentence"),
+                loc_str(r.get("evidence"))]
                for r in rc])
 
     # 待复核
-    sheet("待人工复核", ["类型", "编号/科目", "原因", "原文"],
+    sheet("待人工复核", ["类型", "编号/科目", "原因", "原文", "位置"],
           [["规则", r.get("rule_id"), r.get("reason", ""),
-            (r.get("evidence") or {}).get("raw_text", "")] for r in model["rule_results"]
+            (r.get("evidence") or {}).get("raw_text", ""), loc_str(r.get("evidence"))]
+           for r in model["rule_results"]
            if r.get("status") == "REVIEW"]
-          + [["研报", x.get("claim_id", ""), x.get("reason", ""), _review_sentence(x)]
-             for x in (model["research"] or {}).get("review", [])])
+          + [["研报", x.get("claim_id", ""), x.get("reason", ""), _review_sentence(x),
+              loc_str(x.get("evidence"))]
+             for x in (model.get("research") or {}).get("review", [])])
 
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
@@ -1018,9 +1053,7 @@ def render_html(model: dict, path: Path) -> Path:
             [[STATUS_ZH.get(r.get("status"), r.get("status")), r.get("rule_id"),
               DIM_ZH.get(r.get("dimension", ""), r.get("dimension")),
               r.get("expr", ""), r.get("diff"), r.get("tolerance"),
-              f"p{(r.get('evidence') or {}).get('page')}"
-              if (r.get("evidence") or {}).get("page") is not None
-              else ((r.get("evidence") or {}).get("locator") or "—"),
+              loc_str(r.get("evidence")),
               (r.get("evidence") or {}).get("raw_text") or "—",
               _suggest(r.get("status"), r.get("dimension", ""), r.get("reason", ""))]
              for r in model["anomalies"]]))
@@ -1033,17 +1066,18 @@ def render_html(model: dict, path: Path) -> Path:
         sections.append("<h2>五、研报引用异常与待人工复核</h2>")
         if model["research_fail"]:
             sections.append(_table(
-                ["状态", "科目", "期间", "研报原文", "研报值", "财报值", "差异", "归因"],
-                [[r.get("status"), r.get("item_code"), r.get("period"),
+                ["状态", "科目", "期间", "研报原文", "研报值", "财报值", "差异", "归因", "位置"],
+                [[r.get("status"), r.get("item_code") or "—", str(r.get("period") or "—"),
                   (r.get("left") or {}).get("raw"), (r.get("left") or {}).get("value"),
                   (r.get("right") or {}).get("value"), r.get("diff"),
-                  f"{r.get('cause','')} {r.get('reason','')}"]
+                  f"{r.get('cause','')} {r.get('reason','')}",
+                  loc_str(r.get("evidence"))]
                  for r in model["research_fail"]]))
         if _rv_rows:
             sections.append(f'<p class="meta">待人工复核 {len(_rv_rows)} 条'
                             f'（程序无法自动判定，不代表存在错误）：'
                             f'{_esc("；".join(research_review_reasons(model)))}</p>')
-            sections.append(_table(["科目", "期间", "原因", "研报原句"], _rv_rows))
+            sections.append(_table(["科目", "期间", "原因", "研报原句", "位置"], _rv_rows))
 
     # 研报观点 vs 财报数字：成段点评（有研报比对结果时才出现）
     review = model.get("research_review") or []

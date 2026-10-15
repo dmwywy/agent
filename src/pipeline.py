@@ -158,8 +158,13 @@ def _claim_fields(records: list[dict]) -> list[dict]:
 
 
 def _attach_claim_evidence(matches: list[dict], claim_by_id: dict) -> list[dict]:
-    """程序回填引用位置：研报文件名 + 章节 + 原句，全部来自程序自己的输入。
-    与 §3.1a 同理——位置是客观事实，模型复述它没有信息增益。"""
+    """程序回填引用位置：研报文件名 + 章节 + **页码/段号/表行号/表标题** + 原句。
+
+    ★ 位置必须落到"页码 + 段落/表行"，只给章节不够：研报一段里常挤着多条引用，
+      "核心观点第3段"这种粒度无法让人复核到底指哪一句（比赛要求指明页码与段落）。
+     ★ page 是**推定页码**（docx 无渲染页码，按显式分页符/分节符推定，见
+      tools/extract_claims.read_blocks），报告里一律标注为"推定"。
+     """
     out = []
     for m in matches:
         c = claim_by_id.get(m.get("claim_id"))
@@ -169,6 +174,10 @@ def _attach_claim_evidence(matches: list[dict], claim_by_id: dict) -> list[dict]
                 "file": c["source"] if c else None,
                 "section": c["section"] if c else None,
                 "sentence": c["sentence"] if c else None,
+                "page": c.get("page") if c else None,
+                "para_no": c.get("para_no") if c else None,
+                "row_no": c.get("row_no") if c else None,
+                "caption": c.get("caption") if c else None,
                 # 模型返回了不存在的 claim_id → 证据无效，不得进入核查
                 "verified": c is not None,
             },
@@ -216,6 +225,13 @@ def run_match_claim(claims_path: str, records: list[dict], run_id: str, offline:
     if not p.exists():
         return None, "NO_CLAIMS", []
     all_claims = json.loads(p.read_text(encoding="utf-8"))
+    # ★ 只有"可核查的引用"才送模型：TEXT（正文句）与 TABLE_ROW（带单位的表行）。
+    #   TABLE_HEADER（年份列头）/ TABLE_LABEL（行标签+裸数字，单位写在标签里）不含可与
+    #   财报对齐的数值，送模型只会平白多出"未匹配"待复核条目；它们专供
+    #   src.research_check 的单位/自校验检测器读取。
+    #   用"排除法"而非白名单：旧版 claims 文件可能没有 kind 字段，白名单会把它们整批丢掉。
+    all_claims = [c for c in all_claims
+                  if c.get("kind") not in ("TABLE_HEADER", "TABLE_LABEL")]
     if not all_claims:
         return None, "NO_CLAIMS", []
 
