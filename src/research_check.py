@@ -23,6 +23,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 RULE_ID = "RC01@v1.0"          # 研报引用一致性：一条规则，多个实例（每条 claim 一例）
+YOY_RULE_ID = "RC02@v1.0"      # 研报引用同比核验：同上，只在不符时产出结果
 TOLERANCE_PROFILE = "REPORT_REF"
 
 # 金额+单位 → 换算到"元"的乘数。键为**合法**单位写法。
@@ -134,6 +135,88 @@ def margin_alt_truth(code: str, period: str, idx: dict) -> Decimal | None:
     return (num / den * 100).quantize(Decimal("0.1"))
 
 
+def _fy_index(records: list[dict]) -> dict:
+    """(item_code, 年份) -> 数值：只收期间为纯 4 位年份的时期数记录，供同比基准使用。
+
+    刻意不收时点（2025-12-31）：时点科目没有"同比"这一说，混进来会算出错误的基准。
+    """
+    out: dict[tuple[str, int], object] = {}
+    for r in records:
+        m = re.match(r"^(20\d{2})$", str(r.get("period") or ""))
+        if m:
+            out[(r["item_code"], int(m.group(1)))] = r.get("value")
+    return out
+
+
+def yoy_truth(code: str, period: str, fy: dict) -> Decimal | None:
+    """财报口径同比：(本期−上期)÷|上期|×100。缺上期或分母为零返回 None——不猜、不补。
+
+    只认**纯年份**期间：`2025-H1` / `2025-12-31` 的上期基数不是上一个年度数
+    （前者应比 2024-H1、后者是时点数），拿年度数去算会把基期算错，故一律不产出。
+    """
+    m = re.match(r"^(20\d{2})$", str(period or ""))
+    if not m:
+        return None
+    y = int(m.group(1))
+    cur, prev = fy.get((code, y)), fy.get((code, y - 1))
+    if cur is None or prev is None:
+        return None
+    try:
+        c = Decimal(str(cur).replace(",", "").strip())
+        p = Decimal(str(prev).replace(",", "").strip())
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if p == 0:
+        return None
+    return ((c - p) / abs(p) * 100).quantize(Decimal("0.01"))
+
+
+# 同比容差单列：研报的增速常只保留一位小数（真值 -4.53% 写成 -4.5%），
+# 沿用金额的 rel 档位会把这种"两位小数vs一位小数"的四舍五入差异判成异常。
+YOY_ABS_TOL = Decimal("0.1")
+YOY_REL_TOL = Decimal("0.05")
+
+
+def yoy_tolerance(truth: Decimal) -> Decimal:
+    return max(YOY_ABS_TOL, YOY_REL_TOL * abs(truth))
+
+
+PERIOD_YEAR_RE = re.compile(r"(20\d{2})\s*年")
+YOY_TOKEN_RE = re.compile(r"(?:同比\s*)?([+\-])\s*(\d[\d,]*(?:\.\d+)?)\s*%")
+YOY_WINDOW = 15               # "同比±X%"必须紧跟在数值之后，超出窗口就不认（避免挂到别的指标）
+
+
+def period_year_before(sentence: str, fig: dict) -> str | None:
+    """取指标名**之前**最近的一个"20XX年"，作为该数值的期间修饰；没有则返回 None。
+
+    「截至 2026年6月末合同负债 80.1 亿元」的期间修饰是 2026，而数值匹配的是 2025-12-31
+    ——正是靠这一步才能把"只写错期间、金额没错"的引用抓出来。
+    """
+    pos = fig.get("name_pos")
+    if pos is None:
+        return None
+    years = PERIOD_YEAR_RE.findall(sentence[:pos])
+    return years[-1] if years else None
+
+
+def yoy_after(sentence: str, fig: dict) -> tuple[Decimal, str] | None:
+    """取数值之后紧跟的"同比 ±X%"（窗口内），返回 (带符号的百分数, 原串)；没有则 None。"""
+    end = fig.get("num_end")
+    if end is None:
+        return None
+    seg = sentence[end:end + YOY_WINDOW]
+    m = YOY_TOKEN_RE.search(seg)
+    if not m:
+        return None
+    try:
+        val = Decimal(m.group(2).replace(",", ""))
+    except InvalidOperation:
+        return None
+    if m.group(1) == "-":
+        val = -val
+    return val, seg[:m.end()]
+
+
 def _display_names(fields: dict) -> dict:
     """标准科目编号 -> 中文正式名，用于在句子里定位指标。"""
     return {code: m.get("zh", code) for code, m in fields.items()}
@@ -220,6 +303,8 @@ def associate_figures(sentence: str, zh_map: dict) -> dict[str, dict]:
             "raw": sentence[owner[0]:m.end()],
             "num_raw": m.group(2) + unit,
             "matched_name": sentence[owner[0]:owner[1]],
+            "name_pos": owner[0],     # 指标名起点：供期间修饰短语比对（见 _period_year）
+            "num_end": m.end(),       # 数值终点：供紧随其后的"同比±X%"定位
             "bad_unit": bad_unit,
         })
     return out
@@ -252,6 +337,8 @@ def associate_percent(sentence: str, zh_map: dict) -> dict[str, dict]:
             "raw": sentence[owner[0]:m.end()],
             "num_raw": m.group(2) + "%",
             "matched_name": sentence[owner[0]:owner[1]],
+            "name_pos": owner[0],
+            "num_end": m.end(),
             "bad_unit": "",
         })
     return out
@@ -312,9 +399,14 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
 
         # 预测/多列表格行：列头年份在抽取时丢失，行内数值与年份列无法对齐
         # （见 is_forecast_row）。此时硬判必然张冠李戴，转人工复核。
+        # ★ 预测类指标（含"调整幅度"）本质上需要"上一版预测/一致预期"作为外部基线，
+        #   本系统只用年报数据、不引外部预期（derived.py 铁律 1），故无法确定性核验，
+        #   只能如实转人工复核，不猜、不补。
         if is_forecast_row(sentence):
             skipped.append({**base, "status": "REVIEW",
-                            "reason": "研报为预测/多列表格行（列头年份缺失），期间无法对齐，需人工复核"})
+                            "reason": "研报为预测/多列表格行：列头年份已丢失，且预测类指标"
+                                      "（含调整幅度）需上一版预测基线，无法确定性核验，"
+                                      "需人工复核"})
             continue
 
         # 期间不许混（interfaces.md §1.5）：研报写的是单季/半年度数，财报记录是全年累计，
@@ -343,14 +435,33 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
         truth = Decimal(recs[0]["value"])
         diff = fig["value"] - truth
         tol = tolerance_for(profile, fig["value"], truth)
+        value_ok = abs(diff) <= tol
+
+        # D1 期间短语一致性：研报把期间写错、金额却取自正确的期，数值比对永远抓不到
+        # （金额本来就没错）——「截至 2026年6月末合同负债80.1亿元」即是此类。期间修饰
+        # 取指标名**之前**最近的"20XX年"（见 period_year_before）。
+        # 分级：金额对得上 → 判定期间写错，FAIL；金额也不符 → 可能是模型的期间匹配本身
+        # 有误，不作断言，转人工复核，避免把系统自身的匹配错误记成研报的错。
+        period_year = period_year_before(sentence, fig)
 
         if fig["bad_unit"]:
             # 单位写法本身非法（如"亿万元"）。数值即便凑巧接近也不放行——
             # 这正是"单位错误"这一类要抓的东西，不能因为数值误差在容差内就判通过。
             ok, cause = False, "UNIT_SCALE"
             reason = f"单位写法非法：{fig['bad_unit']}"
+        elif period_year is not None and not str(period).startswith(period_year):
+            if value_ok:
+                ok, cause = False, "PERIOD_MISMATCH"
+                reason = (f"期间不符：研报表述为 {period_year} 年，财报取值期间为 {period}；"
+                          f"金额本身一致（{truth}）")
+            else:
+                skipped.append({**base, "status": "REVIEW",
+                                "reason": f"研报表述期间为 {period_year} 年，与匹配期间 "
+                                          f"{period} 不一致且金额亦不符，疑为期间匹配错误，"
+                                          f"需人工复核"})
+                continue
         else:
-            ok = abs(diff) <= tol
+            ok = value_ok
             cause, reason = ("", "") if ok else classify_diff(fig["value"], truth)
             if not ok:
                 # 口径互认：换另一净利率口径复核一次（见 MARGIN_ALT）。研报口语的
@@ -381,6 +492,38 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
             "truth_page": recs[0].get("page"),
             "truth_chunk_id": recs[0].get("chunk_id"),
         })
+
+        # D2 同比核验（独立规则 RC02）：数值之后紧跟的"同比±X%"是否与财报口径同比一致。
+        # 只用于**金额类、纯年度期间**：比率类研报惯例用"个百分点"表述，基数与百分比不同，
+        # 不在此规则判定；单季/半年度句（QUARTER_RE）的同比基期是同期而非上一年，同样不判。
+        if (rec.get("period_type") == "FY" and code not in RATIO_CODES
+                and not QUARTER_RE.search(sentence)):
+            ya = yoy_after(sentence, fig)
+            truth_yoy = yoy_truth(code, period, _fy_index(records))
+            if ya is not None and truth_yoy is not None:
+                yoy_val, yoy_raw = ya
+                yoy_tol = yoy_tolerance(truth_yoy)
+                if abs(yoy_val - truth_yoy) > yoy_tol:
+                    yoy_diff = yoy_val - truth_yoy
+                    yoy_base = {**base, "rule_id": YOY_RULE_ID,
+                                "left": {"source": "research_report", "raw": yoy_raw,
+                                         "value": str(yoy_val)},
+                                "right": {"item_code": code, "period": period,
+                                          "value": str(truth_yoy)},
+                                "diff": str(yoy_diff), "tolerance": str(yoy_tol),
+                                "matched_text": yoy_raw}
+                    # 符号相反而幅度相当 → 方向写错（如真值 -1.2% 写成 +1.2%），可断言；
+                    # 仅幅度不符 → 可能是口径/四舍五入，转人工复核，不作断言。
+                    if ((yoy_val > 0) != (truth_yoy > 0)
+                            and abs(abs(yoy_val) - abs(truth_yoy)) <= yoy_tol):
+                        results.append({**yoy_base, "status": "FAIL", "severity": "HIGH",
+                                        "cause": "SIGN_ERROR",
+                                        "reason": f"同比方向错误：研报为 {yoy_raw}，"
+                                                  f"财报口径同比为 {truth_yoy}%"})
+                    else:
+                        skipped.append({**yoy_base, "status": "REVIEW",
+                                        "reason": f"研报同比 {yoy_raw} 与财报口径同比 "
+                                                  f"{truth_yoy}% 不符，需人工复核"})
     return {"results": results, "review": skipped}
 
 

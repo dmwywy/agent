@@ -772,6 +772,132 @@ def test_margin_alt_truth_returns_none_when_not_applicable():
     assert margin_alt_truth("RATIO_NET", "2025", idx) is None
 
 
+def test_research_check_flags_period_phrase_mismatch_as_fail():
+    """期间短语写错、金额却取自正确期间：判 FAIL/PERIOD_MISMATCH。
+
+    回归背景（2025 批·标准答案错误2）：研报把"截至 2025年末合同负债 80.1 亿元"
+    改成"截至 2026年6月末"，金额没动，纯数值比对永远抓不到——此前的实现正是把它
+    判成了 PASS（漏报）。
+    """
+    from src.research_check import check
+    matches = [{"claim_id": "c1", "item_code": "CONTRACT_LIAB",
+                "period": "2025-12-31", "evidence": {}}]
+    claims = {"c1": {"sentence": "3）预收款看，截至 2026年6月末合同负债80.1 亿元/"
+                                 "环比 Q3 末增加 2.6 亿元"}}
+    records = [{"item_code": "CONTRACT_LIAB", "period": "2025-12-31",
+                "period_type": "BAL_END", "value": "8006739780.94"}]
+    out = check(matches, claims, records)
+    r = out["results"][0]
+    assert r["status"] == "FAIL" and r["cause"] == "PERIOD_MISMATCH"
+    assert "2026" in r["reason"] and "80.1亿元" in r["left"]["raw"]
+
+
+def test_research_check_period_mismatch_with_wrong_amount_is_review():
+    """期间与金额同时对不上：不作断言，转人工复核（避免把匹配错误记成研报的错）。"""
+    from src.research_check import check
+    matches = [{"claim_id": "c1", "item_code": "CONTRACT_LIAB",
+                "period": "2025-12-31", "evidence": {}}]
+    claims = {"c1": {"sentence": "截至 2026年6月末合同负债 120 亿元"}}
+    records = [{"item_code": "CONTRACT_LIAB", "period": "2025-12-31",
+                "period_type": "BAL_END", "value": "8006739780.94"}]
+    out = check(matches, claims, records)
+    assert out["results"] == []
+    assert out["review"][0]["status"] == "REVIEW"
+    assert "期间" in out["review"][0]["reason"]
+
+
+def test_research_check_flags_yoy_sign_error_as_rc02():
+    """数值之后的"同比±X%"方向写反：产出 RC02 的 FAIL/SIGN_ERROR。
+
+    回归背景（2025 批·标准答案错误4）：真值 -1.2% 被写成 +1.2%。
+    """
+    from src.research_check import check
+    matches = [{"claim_id": "c1", "item_code": "TOTAL_REVENUE", "period": "2025",
+                "evidence": {}}]
+    claims = {"c1": {"sentence": "2025 年公司实现营业总收入1720.5 亿元/同比+1.2%；"}}
+    records = [
+        {"item_code": "TOTAL_REVENUE", "period": "2025", "period_type": "FY",
+         "value": "172054171890.91"},
+        {"item_code": "TOTAL_REVENUE", "period": "2024", "period_type": "FY",
+         "value": "174144069958.25"},
+    ]
+    out = check(matches, claims, records)
+    rc01 = [r for r in out["results"] if r["rule_id"].startswith("RC01")]
+    rc02 = [r for r in out["results"] if r["rule_id"].startswith("RC02")]
+    assert rc01[0]["status"] == "PASS"          # 金额本身对得上，错误只出在同比方向
+    assert rc02[0]["status"] == "FAIL" and rc02[0]["cause"] == "SIGN_ERROR"
+    assert rc02[0]["left"]["raw"].endswith("+1.2%")
+
+
+def test_research_check_yoy_rounding_is_not_flagged():
+    """研报同比只保留一位小数的舍入差异（真值 -1.20 vs 研报 -1.2）不得报错。"""
+    from src.research_check import check
+    matches = [{"claim_id": "c1", "item_code": "TOTAL_REVENUE", "period": "2025",
+                "evidence": {}}]
+    claims = {"c1": {"sentence": "2025 年公司实现营业总收入1720.5 亿元/同比-1.2%；"}}
+    records = [
+        {"item_code": "TOTAL_REVENUE", "period": "2025", "period_type": "FY",
+         "value": "172054171890.91"},
+        {"item_code": "TOTAL_REVENUE", "period": "2024", "period_type": "FY",
+         "value": "174144069958.25"},
+    ]
+    out = check(matches, claims, records)
+    assert all(not r["rule_id"].startswith("RC02") for r in out["results"])
+    assert out["review"] == []
+
+
+def test_research_check_yoy_not_applied_to_quarter_or_ratio():
+    """单季句与比率类不做同比核验：基期不同（同期 vs 上一期 / 百分点 vs 百分比）。"""
+    from src.research_check import check
+    # ① 单季句：整体已因"单季 vs 年度累计不可比"转复核，不得再产出 RC02
+    q_matches = [{"claim_id": "c1", "item_code": "TOTAL_REVENUE", "period": "2025",
+                  "evidence": {}}]
+    q_claims = {"c1": {"sentence": "其中 2025Q4 实现营业总收入 412 亿元/同比-19.3%"}}
+    q_records = [
+        {"item_code": "TOTAL_REVENUE", "period": "2025", "period_type": "FY",
+         "value": "172054171890.91"},
+        {"item_code": "TOTAL_REVENUE", "period": "2024", "period_type": "FY",
+         "value": "174144069958.25"},
+    ]
+    out = check(q_matches, q_claims, q_records)
+    assert out["results"] == []
+    assert all(not r["rule_id"].startswith("RC02") for r in out["review"])
+    # ② 比率类：毛利率的"同比"惯例以百分点表述，基数与百分比不同，不判
+    r_matches = [{"claim_id": "c2", "item_code": "RATIO_GROSS", "period": "2025",
+                  "evidence": {}}]
+    r_claims = {"c2": {"sentence": "2025 年毛利率 91.2%/同比-0.6%"}}
+    r_records = [
+        {"item_code": "RATIO_GROSS", "period": "2025", "period_type": "FY", "value": "91.2"},
+        {"item_code": "RATIO_GROSS", "period": "2024", "period_type": "FY", "value": "90.5"},
+    ]
+    out = check(r_matches, r_claims, r_records)
+    assert [r["rule_id"] for r in out["results"]] == ["RC01@v1.0"]
+
+
+def test_yoy_truth_rejects_non_fy_period():
+    """同比基准只认纯年份期间：时点与半年度的上期基数不同，一律不产出。"""
+    from decimal import Decimal
+    from src.research_check import _fy_index, yoy_truth
+    fy = _fy_index([
+        {"item_code": "TOTAL_REVENUE", "period": "2025", "value": "100"},
+        {"item_code": "TOTAL_REVENUE", "period": "2024", "value": "80"},
+        {"item_code": "TOTAL_REVENUE", "period": "2025-12-31", "value": "999"},
+        {"item_code": "TOTAL_REVENUE", "period": "2025-H1", "value": "50"},
+    ])
+    assert yoy_truth("TOTAL_REVENUE", "2025", fy) == Decimal("25.00")
+    assert yoy_truth("TOTAL_REVENUE", "2025-12-31", fy) is None
+    assert yoy_truth("TOTAL_REVENUE", "2025-H1", fy) is None
+    assert yoy_truth("TOTAL_REVENUE", "2024", fy) is None      # 缺 2023 基期，不猜
+
+
+def test_period_year_before_takes_nearest_preceding_year():
+    """期间修饰取指标名**之前最近**的年份，不得取句中更早的年份。"""
+    from src.research_check import associate_figures, period_year_before
+    sent = "2024 年营收下滑，2025 年营业总收入1720.5 亿元"
+    fig = associate_figures(sent, _ZH)["TOTAL_REVENUE"]
+    assert period_year_before(sent, fig) == "2025"
+
+
 def test_dedup_claim_matches_demotes_multi_period_without_year():
     """同一指标被枚举多个期间且句中无年份 → 整组转人工复核，不留互相矛盾的多条结果。"""
     from src.research_check import dedup_claim_matches
