@@ -71,6 +71,41 @@ def _csi_exec_note(csi: dict) -> str:
     return txt
 
 
+def _calls_text(calls: dict) -> str:
+    """把 `manifest.calls` 统计展开为可读文本，替代直接抛 JSON。
+
+    只读取程序写入的既有字段（缺省按零），不臆造任何数值；供 PDF / HTML 的
+    「项目基本信息」表使用，使评审能直接看懂在线/缓存/未命中的含义。
+    """
+    if not calls:
+        return "无模型调用记录。"
+    total = calls.get("total", 0)
+    api_ok = calls.get("api_ok", 0)
+    cache_hit = calls.get("cache_hit", 0)
+    cache_miss = calls.get("cache_miss", 0)
+    failed = calls.get("failed", 0)
+    parts = [f"模型调用 {total} 次：在线成功 {api_ok} 次、命中本地缓存 {cache_hit} 次"]
+    if cache_miss:
+        parts.append(f"离线未命中缓存 {cache_miss} 次（相关语义任务已转人工复核）")
+    if failed:
+        parts.append(f"调用失败 {failed} 次")
+    return "；".join(parts) + "。"
+
+
+def _text_row_height(text: str, col_width: int, base: float = 15.0) -> float:
+    """按列宽估算成段文本换行后所需行高（Excel 手动行高），避免长文只显示首行。
+
+    中文按 2 个字符宽计；按 `\\n` 分段各自估算后累加；下限为单行高度。
+    """
+    if not text:
+        return base
+    lines = 0
+    for seg in str(text).split("\n"):
+        units = sum(2 if ord(ch) > 0x2E80 else 1 for ch in seg)
+        lines += max(1, -(-units // max(1, col_width)))
+    return base * max(1, lines)
+
+
 def _fields_by_statement(fields: list[dict]) -> list[tuple[str, str, list[dict]]]:
     """把提取字段按所属报表分类 → [(statement, 中文名, 记录列表), ...]（按固定顺序）。
 
@@ -161,7 +196,7 @@ def _accuracy_scope(acc: dict | None) -> list[str]:
 def _commentary_sections(text: str) -> list[list[str]]:
     """把模型输出的「【小节名】正文」多行文本拆成 [[小节名, 正文], ...]。
 
-    对齐券商点评研报的骨架：小节名固定为 收入分析/盈利能力/现金流/风险提示（四模块）。
+    对齐券商点评研报的骨架：小节名固定为 核心观点/收入分析/盈利能力/现金流/风险提示（五小节）。
     不以「【】」开头的行并入上一小节；首行即无标题时按无标题正文处理。
     """
     out: list[list[str]] = []
@@ -198,6 +233,8 @@ def collect(run_id: str) -> dict:
     research = _read(base / "rules" / "research_claims.json", {}) or {}
     mappings = _read(base / "llm" / "mappings.json", {}) or {}
     commentary = _read(base / "llm" / "commentary.json", {}) or {}
+    # 材料识别日志：哪些文件被当成什么处理、哪些没被识别，必须能呈现在报告上
+    ingest_log = _read(base / "ingest_log.json", []) or []
 
     rule_results = results.get("results", [])
     # 模型解释单独存放（结果文件保持纯确定性），此处按编号关联回来仅供展示
@@ -239,6 +276,7 @@ def collect(run_id: str) -> dict:
         "mappings": mappings,
         "fields": fields,
         "commentary": commentary,
+        "ingest_log": ingest_log,
         "counts": _counts(rule_results, research),
     }
     # 成段结论：由已完成聚合的计数与比对结果生成，供三种报告共用同一份文案
@@ -283,6 +321,68 @@ def _counts(rule_results: list[dict], research: dict) -> dict:
     }
 
 
+def merged_anomaly_counts(rule_results: list[dict], research: dict) -> tuple[int, int]:
+    """「异常 / 待复核」的唯一口径：(异常数, 待复核数)。
+
+    ★ 必须合并两个数据源，网页与三种报告都调这一个函数：
+      - 规则级结果落在 runs/<run_id>/rules/results.json；
+      - 研报引用比对结果落在 runs/<run_id>/rules/research_claims.json，
+        其中 results 段是 PASS/FAIL，review 段全部是「程序无法自动判定」的
+        待复核条目（status=REVIEW）。
+      历史上网页只统计前者，于是显示 0，与报告总评的「不一致 3 条、
+      待复核 41 条」对不上。计数口径必须单一来源，不得各算各的。
+    """
+    research = research or {}
+    res = list(rule_results or []) + list(research.get("results") or [])
+    # review 段本身就是"程序无法自动判定"的待复核清单，按条数计入即可；
+    # 不要求每条都带 status（旧产物/测试造的数据可能没有该字段）。
+    review = list(research.get("review") or [])
+    n_fail = sum(1 for r in res if r.get("status") == "FAIL")
+    n_review = sum(1 for r in res if r.get("status") == "REVIEW") + len(review)
+    return n_fail, n_review
+
+
+def _review_sentence(item: dict) -> str:
+    """待复核条目的研报原句：优先 evidence.sentence，其次顶层 sentence（兼容旧产物）。"""
+    return (item.get("evidence") or {}).get("sentence") or item.get("sentence") or ""
+
+
+def research_review_rows(model: dict) -> list[list[str]]:
+    """研报引用「待人工复核」条目的表格行：(科目, 期间, 原因, 研报原句)。
+
+    ★ 只给计数不给明细，评审无从核对到底是哪几句没比对上；报告必须逐条列出。
+    """
+    return [[x.get("item_code") or "—", str(x.get("period") or "—"),
+             x.get("reason", ""), _review_sentence(x)]
+            for x in (model.get("research") or {}).get("review") or []]
+
+
+def research_review_reasons(model: dict) -> list[str]:
+    """待复核条目的原因分布（按出现次数降序）：「原因：N 条」。"""
+    from collections import Counter
+    c = Counter(x.get("reason", "") or "（未给出原因）"
+                for x in (model.get("research") or {}).get("review") or [])
+    return [f"{reason}：{n} 条" for reason, n in c.most_common()]
+
+
+def ingest_notes(model: dict) -> list[str]:
+    """材料识别结果的事实陈述：**未识别的文件必须显式列出**，不得静默丢弃。
+
+    数据取自 runs/<run_id>/ingest_log.json（src.ingest.process_folder 的 log 落盘）。
+    旧运行没有该文件时返回空列表，报告照常生成。
+    """
+    head = {"annual": "年报", "research": "研究报告",
+            "unknown": "未识别", "error": "处理失败"}
+    notes = []
+    for e in model.get("ingest_log") or []:
+        text = (f"[{head.get(e.get('kind'), e.get('kind'))}] "
+                f"{e.get('file')}：{e.get('action')}")
+        if e.get("kind") in ("unknown", "error"):
+            text += ("——该文件未参与字段提取与一致性核查，如需核查请确认材料类型后重新上传。")
+        notes.append(text)
+    return notes
+
+
 def _dim_counts(counts: dict) -> tuple[int, int, int, int, int]:
     """把 rules_per_dim 的计数做展示性汇总：(可执行, 通过, 异常, 待复核, 不适用)。
 
@@ -324,7 +424,16 @@ def build_summary(model: dict) -> list[str]:
                      f"不一致 {sum(1 for r in rc if r.get('status') == 'FAIL')} 条、"
                      f"待人工复核 {len((model.get('research') or {}).get('review') or [])} 条。")
     else:
-        paras.append("本批材料未包含研究报告，或研报引用未匹配到可比字段：研报引用维度不适用。")
+        n_rv = len((model.get("research") or {}).get("review") or [])
+        if n_rv:
+            # ★ 有引用却一条都没能自动比对（离线缓存未命中、模型漏答）：不能说
+            #   "未包含研究报告"，那是误导——必须如实标注这批引用转了人工复核。
+            paras.append(f"研报引用核查本次未完成自动比对：{n_rv} 条引用全部转人工复核"
+                         f"（模型未给出可用的科目/期间匹配，常见于离线运行或缓存未命中），"
+                         f"研报引用维度本轮不参与 CSI 评分。")
+        else:
+            paras.append("本批材料未包含研究报告，或研报引用未匹配到可比字段："
+                         "研报引用维度不适用。")
 
     csi = model.get("csi") or {}
     if csi.get("csi") is not None:
@@ -378,6 +487,12 @@ def build_research_review(model: dict) -> list[str]:
             f"建议核对引用数值、单位与期间，并按证据定位回研报原文确认。")
     if not fails:
         paras.append("研报引用与财报数字全部一致：本批比对未发现引用层面的不一致。")
+    if review:
+        paras.append(f"上述 {len(review)} 条待人工复核条目的原因分布："
+                     + "；".join(research_review_reasons(model)) + "。")
+        paras.append("逐条明细（科目 / 期间 / 原因 / 研报原句）在同一章节的表格中列出；"
+                     "待复核仅表示程序无法自动判定，不代表存在错误，"
+                     "需按原句回到研报与财报原文核对后再定性。")
     return paras
 
 
@@ -456,10 +571,18 @@ def render_pdf(model: dict, path: Path) -> Path:
         ["模型标识", (m.get("model") or {}).get("model_id", "—")],
         ["提示词哈希", "；".join(f"{p['prompt_id']}:{p['sha256'][:12]}"
                               for p in (m.get("prompts") or [])) or "—"],
-        ["调用统计", json.dumps(m.get("calls", {}), ensure_ascii=False)],
+        ["调用统计", _calls_text(m.get("calls", {}))],
         ["提取字段数", str(len(model["fields"]))],
         ["规则结果数", str(model["counts"]["rules_total"])],
     ], widths=[35 * mm, 130 * mm]))
+
+    # 材料识别结果：未识别的文件必须显式标注，不得静默丢弃（否则用户以为它被核查了）
+    notes = ingest_notes(model)
+    if notes:
+        story.append(Paragraph(f"材料识别结果（扫描 {len(model['ingest_log'])} 个文件）", h3))
+        for t in notes:
+            story.append(Paragraph("· " + _esc(t), small))
+        story.append(Spacer(1, 6))
 
     # 3 数据提取结果（按报表类型分类展示）
     story.append(Paragraph("二、数据提取结果（按报表分类）", h2))
@@ -521,16 +644,28 @@ def render_pdf(model: dict, path: Path) -> Path:
     else:
         story.append(Paragraph("本次运行未发现异常。", body))
 
-    # 研报引用异常
-    if model["research_fail"]:
-        story.append(Paragraph("五、研报引用异常", h2))
-        rows = [["科目", "期间", "研报值", "财报值", "差异", "归因"]]
-        for r in model["research_fail"]:
-            rows.append([r.get("item_code", ""), str(r.get("period", "")),
-                         (r.get("left") or {}).get("raw", ""),
-                         (r.get("right") or {}).get("value", "")[:18],
-                         (r.get("diff") or "")[:18], f"{r.get('cause','')} {r.get('reason','')}"])
-        story.append(tbl(rows, widths=[26 * mm, 20 * mm, 30 * mm, 34 * mm, 26 * mm, 29 * mm]))
+    # 研报引用异常与待复核：异常逐条给数值，待复核逐条给原因与原句
+    _rv_rows = research_review_rows(model)
+    if model["research_fail"] or _rv_rows:
+        story.append(Paragraph("五、研报引用异常与待人工复核", h2))
+        if model["research_fail"]:
+            rows = [["科目", "期间", "研报值", "财报值", "差异", "归因"]]
+            for r in model["research_fail"]:
+                rows.append([r.get("item_code", ""), str(r.get("period", "")),
+                             (r.get("left") or {}).get("raw", ""),
+                             (r.get("right") or {}).get("value", "")[:18],
+                             (r.get("diff") or "")[:18],
+                             f"{r.get('cause','')} {r.get('reason','')}"])
+            story.append(tbl(rows, widths=[26 * mm, 20 * mm, 30 * mm, 34 * mm,
+                                           26 * mm, 29 * mm]))
+        if _rv_rows:
+            story.append(Paragraph(
+                f"待人工复核 {len(_rv_rows)} 条（程序无法自动判定，不代表存在错误）："
+                + "；".join(research_review_reasons(model)), small))
+            rows = [["科目", "期间", "原因", "研报原句"]]
+            rows.extend(_rv_rows)
+            story.append(tbl(rows, widths=[24 * mm, 18 * mm, 62 * mm, 61 * mm]))
+            story.append(Spacer(1, 5))
 
     # 研报观点 vs 财报数字：成段点评（有研报比对结果时才出现）
     review = model.get("research_review") or []
@@ -613,9 +748,13 @@ def render_pdf(model: dict, path: Path) -> Path:
     story.append(Spacer(1, 6))
     story.append(Paragraph("人工复核记录", h2))
     reviewed = [r for r in model["rule_results"] if r.get("human_review")]
+    # ★ 口径与网页指标卡、总评统一：规则级与研报两个来源合并，避免出现"待复核 0 条"
+    #   却在上文列出 41 条待复核明细的自相矛盾。
+    _n_fail, _n_review = merged_anomaly_counts(model.get("rule_results") or [],
+                                               model.get("research") or {})
     story.append(Paragraph(
-        f"已回填复核结论 {len(reviewed)} 条；待复核 {model['counts']['rules_per_dim'] and sum(v['review'] for v in model['counts']['rules_per_dim'].values())} 条。",
-        small))
+        f"已回填复核结论 {len(reviewed)} 条；异常 {_n_fail} 条、待人工复核 {_n_review} 条"
+        f"（其中研报引用 {model['counts'].get('research_review', 0)} 条）。", small))
     story.append(Spacer(1, 10))
     story.append(Paragraph(DISCLAIMER, small))
 
@@ -667,10 +806,14 @@ def render_xlsx(model: dict, path: Path) -> Path:
     caveat = _csi_caveat(csi)
     if caveat:
         ws.append(["CSI 口径提示", caveat])
-        ws.cell(ws.max_row, 2).alignment = Alignment(wrap_text=True, vertical="top")
+        _cell = ws.cell(ws.max_row, 2)
+        _cell.alignment = Alignment(wrap_text=True, vertical="top")
+        ws.row_dimensions[ws.max_row].height = _text_row_height(_cell.value, 70)
     if csi:
         ws.append(["CSI 可执行维度", _csi_exec_note(csi)])
-        ws.cell(ws.max_row, 2).alignment = Alignment(wrap_text=True, vertical="top")
+        _cell = ws.cell(ws.max_row, 2)
+        _cell.alignment = Alignment(wrap_text=True, vertical="top")
+        ws.row_dimensions[ws.max_row].height = _text_row_height(_cell.value, 70)
     # 提取准确率：与 PDF/网页一致，无论有无金标准都给出该行（无金标准时写明原因）
     acc = model.get("accuracy")
     if acc:
@@ -684,6 +827,13 @@ def render_xlsx(model: dict, path: Path) -> Path:
     ws.append(["提取准确率", acc_txt])
     ws.cell(ws.max_row, 2).alignment = Alignment(wrap_text=True, vertical="top")
     ws.append(["声明", DISCLAIMER])
+    # 材料识别结果：未识别的文件在 Excel 里也必须能看到，不得只在命令行 stdout 一闪而过
+    _notes = ingest_notes(model)
+    if _notes:
+        ws.append(["材料识别", "\n".join(_notes)])
+        _cell = ws.cell(ws.max_row, 2)
+        _cell.alignment = Alignment(wrap_text=True, vertical="top")
+        ws.row_dimensions[ws.max_row].height = _text_row_height(_cell.value, 70)
     # 核查总评 / 研报差异点评 / 大模型评价：成段文本整段落入单元格并自动换行，Excel 里也能直接读到结论
     comment = (model.get("commentary") or {}).get("text", "")
     for label, paras in (("核查总评", model.get("summary") or []),
@@ -692,7 +842,9 @@ def render_xlsx(model: dict, path: Path) -> Path:
         if not paras:
             continue
         ws.append([label, "\n".join(paras)])
-        ws.cell(ws.max_row, 2).alignment = Alignment(wrap_text=True, vertical="top")
+        _cell = ws.cell(ws.max_row, 2)
+        _cell.alignment = Alignment(wrap_text=True, vertical="top")
+        ws.row_dimensions[ws.max_row].height = _text_row_height(_cell.value, 70)
     ws.column_dimensions["A"].width = 18
     ws.column_dimensions["B"].width = 70
 
@@ -759,7 +911,7 @@ def render_xlsx(model: dict, path: Path) -> Path:
           [["规则", r.get("rule_id"), r.get("reason", ""),
             (r.get("evidence") or {}).get("raw_text", "")] for r in model["rule_results"]
            if r.get("status") == "REVIEW"]
-          + [["研报", x.get("claim_id", ""), x.get("reason", ""), x.get("sentence", "")]
+          + [["研报", x.get("claim_id", ""), x.get("reason", ""), _review_sentence(x)]
              for x in (model["research"] or {}).get("review", [])])
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -821,9 +973,14 @@ def render_html(model: dict, path: Path) -> Path:
          ["模型标识", (m.get("model") or {}).get("model_id", "—")],
          ["提示词哈希", "；".join(f"{p['prompt_id']}:{p['sha256'][:12]}"
                               for p in (m.get("prompts") or [])) or "—"],
-         ["调用统计", json.dumps(m.get("calls", {}), ensure_ascii=False)],
+         ["调用统计", _calls_text(m.get("calls", {}))],
          ["提取字段数", len(model["fields"])],
          ["规则结果数", model["counts"]["rules_total"]]]))
+    # 材料识别结果：未识别的文件必须显式标注，不得静默丢弃
+    _notes = ingest_notes(model)
+    if _notes:
+        sections.append("<h3>材料识别结果</h3>" + "".join(
+            f'<p class="meta">{_esc(t)}</p>' for t in _notes))
 
     # 数据提取结果（按报表类型分类展示）
     sections.append("<h2>二、数据提取结果（按报表分类）</h2>")
@@ -870,14 +1027,23 @@ def render_html(model: dict, path: Path) -> Path:
     else:
         sections.append("<p>本次运行未发现异常。</p>")
 
-    if model["research_fail"]:
-        sections.append("<h2>五、研报引用异常</h2>" + _table(
-            ["状态", "科目", "期间", "研报原文", "研报值", "财报值", "差异", "归因"],
-            [[r.get("status"), r.get("item_code"), r.get("period"),
-              (r.get("left") or {}).get("raw"), (r.get("left") or {}).get("value"),
-              (r.get("right") or {}).get("value"), r.get("diff"),
-              f"{r.get('cause','')} {r.get('reason','')}"]
-             for r in model["research_fail"]]))
+    # 研报引用异常与待复核：异常逐条给出数值与归因，待复核逐条给出原因与原句
+    _rv_rows = research_review_rows(model)
+    if model["research_fail"] or _rv_rows:
+        sections.append("<h2>五、研报引用异常与待人工复核</h2>")
+        if model["research_fail"]:
+            sections.append(_table(
+                ["状态", "科目", "期间", "研报原文", "研报值", "财报值", "差异", "归因"],
+                [[r.get("status"), r.get("item_code"), r.get("period"),
+                  (r.get("left") or {}).get("raw"), (r.get("left") or {}).get("value"),
+                  (r.get("right") or {}).get("value"), r.get("diff"),
+                  f"{r.get('cause','')} {r.get('reason','')}"]
+                 for r in model["research_fail"]]))
+        if _rv_rows:
+            sections.append(f'<p class="meta">待人工复核 {len(_rv_rows)} 条'
+                            f'（程序无法自动判定，不代表存在错误）：'
+                            f'{_esc("；".join(research_review_reasons(model)))}</p>')
+            sections.append(_table(["科目", "期间", "原因", "研报原句"], _rv_rows))
 
     # 研报观点 vs 财报数字：成段点评（有研报比对结果时才出现）
     review = model.get("research_review") or []

@@ -164,6 +164,9 @@ def ingest(folder: str, run_id: str, offline: bool = False,
 
     out_dir = ROOT / "runs" / run_id / "ingested"
     result = process_folder(Path(folder), out_dir, default_year, report_period)
+    # 分类日志落盘（与网页入口一致）：命令行入口的"未识别"也要能在报告里看到，
+    # 不能只打在 stdout 上。放运行根目录，避免被当作字段记录读入。
+    _write_json(ROOT / "runs" / run_id / "ingest_log.json", result["log"])
 
     print(f"扫描到 {result['files']} 个文件：")
     for e in result["log"]:

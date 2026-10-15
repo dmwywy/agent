@@ -314,11 +314,26 @@ def check(matches: list[dict], claims_by_id: dict, records: list[dict]) -> dict:
 
 
 def run_research_check(claims_path: str, matches: list[dict],
-                       records: list[dict], run_id: str) -> dict:
-    """供 pipeline 调用的入口：读研报原文、比对、落盘。"""
+                       records: list[dict], run_id: str,
+                       unmatched: list[dict] | None = None) -> dict:
+    """供 pipeline 调用的入口：读研报原文、比对、落盘。
+
+    ``unmatched``：模型压根没作答的 claim（典型是离线缓存未命中）。必须一并记成
+    「待人工复核」——否则这批引用在报告与网页里凭空消失，读者会以为它们已被核查。
+    """
     claims = json.loads((ROOT / claims_path).read_text(encoding="utf-8"))
     by_id = {c["claim_id"]: c for c in claims}
     out = check(matches, by_id, records)
+    for u in unmatched or []:
+        c = by_id.get(u.get("claim_id")) or {}
+        out["review"].append({
+            "rule_id": RULE_ID, "dimension": "C研", "claim_id": u.get("claim_id"),
+            "item_code": u.get("item_code"), "period": u.get("period"),
+            "status": "REVIEW",
+            "reason": u.get("reason") or "模型未返回该条的匹配结果",
+            "evidence": {"file": c.get("source"), "section": c.get("section"),
+                         "sentence": u.get("sentence") or c.get("sentence")},
+        })
     p = ROOT / "runs" / run_id / "rules" / "research_claims.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True),

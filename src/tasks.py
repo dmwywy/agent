@@ -8,8 +8,8 @@ import yaml
 from src.llm import call
 from src.schemas import SCHEMA_BY_TASK
 from src.manifest import sha256_text
-from src.validators import (check_enum_whitelist, check_evidence,
-                            check_no_amounts)
+from src.validators import (check_commentary_sections, check_enum_whitelist,
+                            check_evidence, check_no_amounts)
 
 ROOT = Path(__file__).resolve().parents[1]
 PROMPT_DIR = ROOT / "prompts"
@@ -64,8 +64,11 @@ def _post_checks(data: dict, task: str, context: dict | None) -> list[str]:
         ok, msg = check_evidence(data["evidence"], chunks)
         if not ok:
             errs.append(msg)
-    if task == "gen_commentary" and ctx.get("allowed_numbers"):
-        errs += check_no_amounts(data.get("text", ""), ctx["allowed_numbers"])
+    if task == "gen_commentary":
+        if ctx.get("allowed_numbers"):
+            errs += check_no_amounts(data.get("text", ""), ctx["allowed_numbers"])
+        # 小节名白名单：拦越界小节名 + 必含【核心观点】；其余小节不强制齐备
+        errs += check_commentary_sections(data.get("text", ""))
     return errs
 
 

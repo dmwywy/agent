@@ -207,13 +207,17 @@ def _match_claim_batched(claims: list[dict], fields: list[dict],
 
 def run_match_claim(claims_path: str, records: list[dict], run_id: str, offline: bool,
                     api_key: str | None = None):
-    """研报引用匹配：claim 句子 → (item_code, period)。数值比较交给规则侧（C研 维度）。"""
+    """研报引用匹配：claim 句子 → (item_code, period)。数值比较交给规则侧（C研 维度）。
+
+    返回 (matches, status, unmatched)：unmatched 是模型没作答的 claim（离线缓存未命中、
+    输出截断等），必须交回调用方一并记成「待人工复核」，不能只存在 claim_matches.json 里。
+    """
     p = ROOT / claims_path
     if not p.exists():
-        return None, "NO_CLAIMS"
+        return None, "NO_CLAIMS", []
     all_claims = json.loads(p.read_text(encoding="utf-8"))
     if not all_claims:
-        return None, "NO_CLAIMS"
+        return None, "NO_CLAIMS", []
 
     fields = _claim_fields(records)
     matches, flat_status = [], []
@@ -227,18 +231,19 @@ def run_match_claim(claims_path: str, records: list[dict], run_id: str, offline:
     claim_by_id = {c["claim_id"]: c for c in claims}
     enriched = _attach_claim_evidence(matches, claim_by_id)
     matched_ids = {m["claim_id"] for m in matches}
+    # 模型漏答的 claim：不猜测，一律进人工复核
+    unmatched = [{"claim_id": c["claim_id"], "reason": "模型未返回该条的匹配结果",
+                  "sentence": c["sentence"]}
+                 for c in claims if c["claim_id"] not in matched_ids]
     _write_json(run_id, "llm/claim_matches.json", {
         "run_id": run_id,
         "status": "|".join(dict.fromkeys(flat_status)),
         "claims_sent": len(claims),
         "fields_offered": len(fields),
         "matches": enriched,
-        # 模型漏答的 claim：不猜测，一律进人工复核
-        "review": [{"claim_id": c["claim_id"], "reason": "模型未返回该条的匹配结果",
-                    "sentence": c["sentence"]}
-                   for c in claims if c["claim_id"] not in matched_ids],
+        "review": unmatched,
     })
-    return enriched, "|".join(dict.fromkeys(flat_status))
+    return enriched, "|".join(dict.fromkeys(flat_status)), unmatched
 
 
 def explain_summary(run_id: str) -> str:
@@ -354,14 +359,17 @@ def run(config_path: str, offline: bool = False, run_id: str = "demo",
     # 1. 科目归一化（财报原文科目名 → 标准科目编号）
     _, s_item = run_match_item(records, run_id, offline, api_key=api_key)
     # 2. 研报引用匹配（claim 句子 → 科目+期间）：模型只答"在说哪个指标"
-    claim_matches, s_claim = (run_match_claim(claims_path, check_records, run_id, offline,
-                                              api_key=api_key)
-                              if claims_path else (None, "NOT_CONFIGURED"))
+    claim_matches, s_claim, claim_unmatched = (
+        run_match_claim(claims_path, check_records, run_id, offline, api_key=api_key)
+        if claims_path else (None, "NOT_CONFIGURED", []))
     # 2b. C研 维度数值比对（确定性计算，模型不参与，见 src/research_check.py）
     s_research = "SKIPPED"
     rc = None
-    if claim_matches:
-        rc = run_research_check(claims_path, claim_matches, check_records, run_id)
+    # ★ 只要有 claim 就必须跑 C研：模型一条也没答上（典型是离线缓存未命中）时，
+    #   这批引用要作为「待人工复核」留痕，而不是整批消失、让读者以为已经被核查过。
+    if claims_path and (claim_matches or claim_unmatched):
+        rc = run_research_check(claims_path, claim_matches or [], check_records, run_id,
+                                unmatched=claim_unmatched)
         s_research = "PASS={}/FAIL={}/REVIEW={}".format(
             sum(1 for r in rc["results"] if r["status"] == "PASS"),
             sum(1 for r in rc["results"] if r["status"] == "FAIL"),

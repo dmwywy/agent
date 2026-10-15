@@ -1,6 +1,7 @@
 """Web upload orchestration shared by the Streamlit form and local acceptance."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Callable, Iterable
@@ -69,6 +70,15 @@ def run_uploaded_reports(
         input_dir, run_root / "ingested", default_year=int(default_year),
         report_period=report_period,
     )
+    # ★ 分类日志必须落盘：哪份材料被当成年报、哪份被当成研报、哪份**没被识别**，
+    #   是使用者判断"这份文件到底有没有被核查"的唯一依据。只 print 到 stdout
+    #   在网页端完全看不到，未识别的文件就会被当成已核查，属于误导。
+    #   放运行根目录而非 ingested/：load_structured 与 report.collect 都用
+    #   非递归 glob("*.json") 读 ingested/，日志放进去会被当成字段记录。
+    (run_root / "ingest_log.json").write_text(
+        json.dumps(ingest_result.get("log") or [], ensure_ascii=False,
+                   indent=2, sort_keys=True),
+        encoding="utf-8")
 
     # ★ 一份年报都没识别出来时**不报错**：照常用（空的）本轮 ingested 目录跑完流程，
     #   产出一份"未识别到可核查字段"的说明性报告。上传任意 PDF/DOCX 都应拿回报告，

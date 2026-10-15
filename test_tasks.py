@@ -466,6 +466,64 @@ def test_commentary_sections_split():
     assert secs[1][1] == "营业总收入…续写一句。"
 
 
+def test_commentary_section_names_whitelisted():
+    """gen_commentary 小节名须落在五小节集合内，且必含【核心观点】。"""
+    from src.validators import check_commentary_sections
+    ok = ("【核心观点】经营稳健。\n【收入分析】收入…\n【盈利能力】毛利…\n"
+          "【现金流】…\n【风险提示】…")
+    assert check_commentary_sections(ok) == []
+    errs = check_commentary_sections("【核心观点】…\n【经营情况】已弃用小节")
+    assert errs and "未定义的小节名" in errs[0]
+    missing = check_commentary_sections("【收入分析】…\n【盈利能力】…")
+    assert missing and "核心观点" in missing[0]
+    assert check_commentary_sections("")                     # 空文本同样缺核心观点
+
+
+def test_gen_commentary_prompt_declares_five_sections():
+    """提示词必须声明五小节、【核心观点】排首位，样例行也须含核心观点。"""
+    from src.tasks import load_prompt
+    text, _ = load_prompt("gen_commentary")
+    idx = [text.index(s) for s in ("【核心观点】", "【收入分析】", "【盈利能力】",
+                                   "【现金流】", "【风险提示】")]
+    assert idx == sorted(idx)
+    assert "5 个固定小节" in text
+    sample = [ln for ln in text.splitlines() if ln.startswith('{"ok":true')]
+    assert sample and sample[0].index("【核心观点】") < sample[0].index("【收入分析】")
+
+
+def test_post_checks_require_core_viewpoint():
+    """校验层：缺【核心观点】的评价被拦下（触发修复重试），五节齐全则放行。"""
+    from src.tasks import _post_checks
+    ctx = {"allowed_numbers": set()}
+    ok = {"ok": True, "text": "【核心观点】…\n【收入分析】…\n【盈利能力】…\n"
+                              "【现金流】…\n【风险提示】…"}
+    assert _post_checks(ok, "gen_commentary", ctx) == []
+    bad = {"ok": True, "text": "【收入分析】…\n【盈利能力】…"}
+    errs = _post_checks(bad, "gen_commentary", ctx)
+    assert any("核心观点" in e for e in errs)
+
+
+def test_calls_text_is_readable_not_raw_json():
+    """调用统计须展开为可读文本，不得把 JSON 花括号直接抛给评审。"""
+    from src.report import _calls_text
+    txt = _calls_text({"api_ok": 1, "cache_hit": 2, "cache_miss": 3,
+                       "failed": 0, "total": 6})
+    assert "{" not in txt and "}" not in txt
+    assert "在线成功 1 次" in txt and "命中本地缓存 2 次" in txt
+    assert "未命中缓存 3 次" in txt
+    assert "调用失败" not in txt                     # failed 为 0 时不出现该句
+    assert _calls_text({}) == "无模型调用记录。"
+
+
+def test_excel_row_height_scales_with_text_length():
+    """Excel 成段文本行高应按长度增长，避免打开时只显示第一行。"""
+    from src.report import _text_row_height
+    assert _text_row_height("", 70) == 15.0
+    short = _text_row_height("一句话", 70)
+    long_ = _text_row_height("一句话" * 100, 70)
+    assert long_ > short >= 15.0
+
+
 # ---------- C：缓存与失败分流 ----------
 
 def test_cache_key_stable_and_sensitive():
@@ -1920,3 +1978,220 @@ def test_error_fixture_meets_interface_contract():
         "UNIT_SCALE", "PERIOD_MISMATCH", "SCOPE_MIXED", "VALUE_ERROR", "SIGN_ERROR",
     }
     assert len({r["claim_id"] for r in rows}) == 10
+
+
+# ---- 异常计数口径一致性：网页指标卡与报告总评必须同源（防"显示 0"复发） ----
+
+def test_merged_anomaly_counts_combines_rules_and_research():
+    """「异常 / 待复核」必须合并规则级与研报两个数据源，口径与报告总评一致。
+
+    回归背景：网页指标卡只统计 rules/results.json，而 C研 的研报引用比对结果
+    落在 rules/research_claims.json（results + review 两段），于是网页显示 0，
+    与报告总评的「不一致 3 条、待复核 41 条」对不上。
+    """
+    from src.report import merged_anomaly_counts
+
+    rules = [{"status": "PASS"}] * 36 + [{"status": "NA"}] * 8
+    research = {"results": [{"status": "PASS"}] * 5 + [{"status": "FAIL"}] * 3,
+                "review": [{"status": "REVIEW", "reason": "r"}] * 41}
+    assert merged_anomaly_counts(rules, research) == (3, 41)
+
+    # 规则级也有 FAIL/REVIEW 时必须一并计入，不能只算研报那一半
+    rules2 = [{"status": "FAIL"}, {"status": "REVIEW"}, {"status": "PASS"}]
+    research2 = {"results": [{"status": "FAIL"}], "review": [{"claim_id": "c2"}]}
+    assert merged_anomaly_counts(rules2, research2) == (2, 2)
+
+    # review 段不带 status 的历史/测试产物也必须按条数计入（不能因缺字段漏计）
+    assert merged_anomaly_counts([], {"review": [{"claim_id": "c"}] * 7}) == (0, 7)
+
+    # 缺产物时不得报错（网页会在没有研报的文件上调用同一函数）
+    assert merged_anomaly_counts([], {}) == (0, 0)
+    assert merged_anomaly_counts(None, None) == (0, 0)
+
+
+def test_report_lists_research_review_items_not_only_counts():
+    """研报待复核条目必须在报告里逐条列出（原因 + 研报原句），不能只给一个计数。"""
+    from openpyxl import load_workbook
+    from src.pipeline import ROOT
+    from src.report import build_all, research_review_rows
+
+    run_id = "pytest_report_review_items"
+    _make_run_fixture(run_id)
+    made = build_all(run_id, ("html", "xlsx", "pdf"))
+
+    rows = research_review_rows({"research": json.loads(
+        (ROOT / "runs" / run_id / "rules" / "research_claims.json").read_text(encoding="utf-8"))})
+    assert len(rows) == 1
+    assert rows[0][2] == "模型未返回该条的匹配结果"
+    assert "预计2025年收入增长8%" in rows[0][3]
+
+    html = (ROOT / made["html"]).read_text(encoding="utf-8")
+    assert "五、研报引用异常与待人工复核" in html
+    assert "待人工复核 1 条" in html
+    assert "模型未返回该条的匹配结果" in html
+    assert "预计2025年收入增长8%" in html
+
+    wb = load_workbook(ROOT / made["xlsx"])
+    cells = [str(c.value) for row in wb["待人工复核"].iter_rows() for c in row if c.value]
+    assert "模型未返回该条的匹配结果" in cells
+    assert any("预计2025年收入增长8%" in v for v in cells), \
+        "研报原句须从 evidence.sentence 取，不能因取错字段而恒为空"
+
+    with __import__("pdfplumber").open(ROOT / made["pdf"]) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    assert "研报引用异常与待人工复核" in text and "待人工复核 1 条" in text
+    assert "预计2025年收入增长8%" in text
+    # 收尾的「人工复核记录」也须给出合并后的待复核数，不能显示 0
+    assert "待人工复核 1 条" in text
+
+
+def test_report_flags_unrecognized_files_across_formats():
+    """未识别的上传文件必须在三种报告里显式标注，不得静默丢弃。"""
+    from openpyxl import load_workbook
+    from src.report import ingest_notes
+
+    run_id = "pytest_report_unrecognized"
+    _make_run_fixture(run_id)
+    log = [{"file": "a_2024.pdf", "kind": "annual", "hits": 3, "action": "抽取 40 条字段"},
+           {"file": "审计报告.docx", "kind": "unknown", "hits": 0,
+            "action": "跳过：既不像年报也不像研报"}]
+    from src.pipeline import ROOT
+    from src.report import build_all
+    (ROOT / "runs" / run_id / "ingest_log.json").write_text(
+        json.dumps(log, ensure_ascii=False), encoding="utf-8")
+
+    notes = ingest_notes({"ingest_log": log})
+    assert any("审计报告.docx" in n and "未识别" in n for n in notes)
+    assert any("未参与字段提取与一致性核查" in n for n in notes)
+
+    made = build_all(run_id, ("html", "xlsx", "pdf"))
+    html = (ROOT / made["html"]).read_text(encoding="utf-8")
+    assert "材料识别结果" in html and "审计报告.docx" in html
+
+    wb = load_workbook(ROOT / made["xlsx"])
+    cells = [str(c.value) for row in wb["摘要"].iter_rows() for c in row if c.value]
+    assert any(v == "材料识别" for v in cells)
+    assert any("审计报告.docx" in v for v in cells)
+
+    with __import__("pdfplumber").open(ROOT / made["pdf"]) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    assert "材料识别结果" in text and "审计报告.docx" in text
+
+
+def test_web_upload_persists_ingest_log(monkeypatch):
+    """上传编排必须把分类日志（含"未识别"）落盘到 runs/<run_id>/ingest_log.json。"""
+    import shutil
+    from src import ingest, pipeline, report
+    from src.web import ROOT, run_uploaded_reports
+
+    run_id = "pytest_web_ingest_log"
+    run_root = ROOT / "runs" / run_id
+    shutil.rmtree(run_root, ignore_errors=True)
+
+    class Upload:
+        def __init__(self, name):
+            self.name = name
+
+        def getvalue(self):
+            return b"payload"
+
+    log = [{"file": "审计报告.docx", "kind": "unknown", "hits": 0,
+            "action": "跳过：既不像年报也不像研报"}]
+    monkeypatch.setattr(ingest, "process_folder",
+                        lambda folder, out_dir, default_year, report_period=None: {
+                            "log": log, "structured_files": [], "claims_path": None})
+    monkeypatch.setattr(pipeline, "run", lambda *a, **k: None)
+    monkeypatch.setattr(report, "build_all", lambda r, f: {})
+
+    try:
+        run_uploaded_reports([Upload("审计报告.docx")], run_id=run_id,
+                             default_year=2024, offline=True)
+        saved = json.loads((run_root / "ingest_log.json").read_text(encoding="utf-8"))
+        assert saved == log
+    finally:
+        shutil.rmtree(run_root, ignore_errors=True)
+
+
+# ---- 语义任务失败/离线缓存未命中：claim 必须留痕为「待人工复核」 ----
+
+def test_research_check_records_unmatched_claims_as_review():
+    """模型未作答的 claim 必须落进「待人工复核」，不能在报告与网页里凭空消失。"""
+    import shutil
+    from src.pipeline import ROOT
+    from src.research_check import run_research_check
+
+    run_id = "pytest_rc_unmatched"
+    base = ROOT / "runs" / run_id
+    shutil.rmtree(base, ignore_errors=True)
+    base.mkdir(parents=True)
+    (base / "claims.json").write_text(json.dumps([
+        {"claim_id": "a::1", "sentence": "归母净利润 862.3 亿万元",
+         "section": "核心观点", "source": "模拟研究报告.docx"},
+    ], ensure_ascii=False), encoding="utf-8")
+    try:
+        out = run_research_check(f"runs/{run_id}/claims.json", [], [], run_id,
+                                 unmatched=[{"claim_id": "a::1",
+                                             "reason": "模型未返回该条的匹配结果",
+                                             "sentence": "归母净利润 862.3 亿万元"}])
+        assert out["results"] == []
+        assert len(out["review"]) == 1
+        item = out["review"][0]
+        assert item["status"] == "REVIEW" and item["dimension"] == "C研"
+        assert item["claim_id"] == "a::1"
+        assert "862.3 亿万元" in item["evidence"]["sentence"]
+        saved = json.loads((base / "rules" / "research_claims.json").read_text(encoding="utf-8"))
+        assert len(saved["review"]) == 1 and saved["results"] == []
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_match_claim_returns_unmatched_for_review(monkeypatch):
+    """离线缓存未命中时 run_match_claim 必须把未作答的 claim 交回调用方。
+
+    回归背景：unmatched 此前只写进 llm/claim_matches.json，调用方拿不到，
+    于是 claim_matches 为空时整段 C研 被跳过（manifest research_check=SKIPPED），
+    39 条引用既不进「异常」也不进「待复核」，网页显示 0/0。
+    """
+    import shutil
+    from src import pipeline
+    from src.pipeline import ROOT, run_match_claim
+
+    run_id = "pytest_match_claim_unmatched"
+    base = ROOT / "runs" / run_id
+    shutil.rmtree(base, ignore_errors=True)
+    base.mkdir(parents=True)
+    (base / "claims.json").write_text(json.dumps([
+        {"claim_id": "a::1", "sentence": "s1"}, {"claim_id": "a::2", "sentence": "s2"},
+    ], ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(pipeline, "call_task",
+                        lambda *a, **k: (None, "NO_CACHE_OFFLINE"))
+    try:
+        matches, status, unmatched = run_match_claim(
+            f"runs/{run_id}/claims.json", [], run_id, offline=True)
+        assert matches == [] and "NO_CACHE_OFFLINE" in status
+        assert [u["claim_id"] for u in unmatched] == ["a::1", "a::2"]
+        saved = json.loads(
+            (base / "llm" / "claim_matches.json").read_text(encoding="utf-8"))
+        assert saved["matches"] == [] and len(saved["review"]) == 2
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_summary_flags_unmatched_research_claims_as_review():
+    """有引用却一条都没能自动比对时，总评必须如实标注，不能说"未包含研究报告"。"""
+    from src.pipeline import ROOT
+    from src.report import build_summary, collect, merged_anomaly_counts
+
+    run_id = "pytest_summary_unmatched_research"
+    _make_run_fixture(run_id)
+    (ROOT / "runs" / run_id / "rules" / "research_claims.json").write_text(
+        json.dumps({"results": [], "review": [
+            {"claim_id": f"c{i}", "status": "REVIEW", "reason": "模型未返回该条的匹配结果"}
+            for i in range(39)]}, ensure_ascii=False), encoding="utf-8")
+
+    model = collect(run_id)
+    text = "\n".join(build_summary(model))
+    assert "39 条引用全部转人工复核" in text
+    assert "未包含研究报告" not in text
+    # 计数口径同步：研报 39 条待复核必须进入网页指标卡的同一个函数
+    assert merged_anomaly_counts(model["rule_results"], model["research"])[1] >= 39

@@ -15,7 +15,8 @@ import pandas as pd
 import streamlit as st
 
 # CSI 口径提示：与报告三格式共用同一份文案，避免"满分 = 全部维度通过"的误导
-from src.report import _csi_caveat
+# 「异常 / 待复核」计数同样与报告总评同源，见 src.report.merged_anomaly_counts
+from src.report import _csi_caveat, merged_anomaly_counts
 
 ROOT = Path(__file__).resolve().parent
 STATUS_ZH = {"PASS": "通过", "FAIL": "异常", "REVIEW": "需人工复核", "NA": "不适用"}
@@ -140,6 +141,10 @@ for p in sorted((base / "ingested").glob("*.json")) if (base / "ingested").exist
 
 # ---- 顶部指标卡 ----
 calls = manifest.get("calls", {})
+# ★ 「异常 / 待复核」必须与 PDF/Excel/网页报告的总评同源：规则级结果在
+#   rules/results.json，研报引用结果在 rules/research_claims.json（results + review 两段）。
+#   只统计前者时网页显示 0，与报告里的「不一致 3 条、待复核 41 条」对不上。
+n_fail, n_review = merged_anomaly_counts(results, research)
 anomalies = [r for r in results if r.get("status") in ("FAIL", "REVIEW")]
 c1, c2, c3, c4, c5 = st.columns(5)
 _csi_caveat_text = _csi_caveat(csi)
@@ -148,13 +153,22 @@ c1.metric("CSI（临时）" if _csi_caveat_text else "CSI",
           csi.get("grade_label", ""), delta_color="off")
 c2.metric("提取字段", len(fields))
 c3.metric("规则结果", len(results))
-c4.metric("异常 / 待复核", len(anomalies))
+c4.metric("异常 / 待复核", f"{n_fail} / {n_review}",
+          help="异常 = 规则级 FAIL + 研报引用 FAIL；待复核 = 规则级 REVIEW + 研报引用 REVIEW。"
+               "两段研报比对结果存放在 rules/research_claims.json，与报告总评口径一致。")
 c5.metric("模型调用", f"{calls.get('api_ok', 0)} 在线 / {calls.get('cache_hit', 0)} 缓存")
 if _csi_caveat_text:
     st.warning(f"CSI 口径提示：{_csi_caveat_text}")
 st.caption("指标卡读的是**左侧选中的历史运行**的统计，与上传表单里是否勾选离线无关。"
            "「模型调用」= 在线（api_ok，真实请求成功）/ 缓存（cache_hit，命中本地缓存）。"
            "离线运行、或该次全部命中缓存时，都会显示为 0 在线。")
+
+# 未识别 / 处理失败的文件必须显式提示：否则用户以为它已经被核查过了
+_ingest_log = _read(base / "ingest_log.json", []) or []
+_unrecognized = [e for e in _ingest_log if e.get("kind") in ("unknown", "error")]
+if _unrecognized:
+    st.warning("以下上传文件未被识别，**未参与字段提取与一致性核查**："
+               + "；".join(f"{e.get('file')}（{e.get('action')}）" for e in _unrecognized))
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["① 异常清单", "② 一致性指标", "③ 提取字段", "④ 规则明细", "⑤ 报告下载"],
@@ -163,7 +177,9 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 
 # ---- ① 异常清单 ----
 with tab1:
-    if not anomalies:
+    rf = [x for x in research.get("results", []) if x.get("status") == "FAIL"]
+    rv = list(research.get("review") or [])
+    if not anomalies and not rf and not rv:
         st.success("本次运行未发现异常。")
     else:
         for r in anomalies:
@@ -190,7 +206,6 @@ with tab1:
                 if ev.get("raw_text"):
                     st.code(ev["raw_text"], language=None)
 
-    rf = [x for x in research.get("results", []) if x.get("status") == "FAIL"]
     if rf:
         st.subheader("研报引用异常")
         st.dataframe(pd.DataFrame([{
@@ -199,6 +214,19 @@ with tab1:
             "财报值": (x.get("right") or {}).get("value"),
             "差异": x.get("diff"), "归因": x.get("cause"), "说明": x.get("reason"),
         } for x in rf]), width='stretch')
+
+    if rv:
+        st.subheader(f"研报引用待人工复核（{len(rv)} 条）")
+        st.caption("程序无法自动判定，不代表存在错误。这些条目同样计入上方的"
+                   "「异常 / 待复核」指标卡，与报告总评口径一致。")
+        _reasons = pd.Series([x.get("reason", "") for x in rv]).value_counts()
+        st.dataframe(pd.DataFrame({
+            "原因": _reasons.index, "条数": _reasons.values}), width='stretch', hide_index=True)
+        st.dataframe(pd.DataFrame([{
+            "科目": x.get("item_code") or "—", "期间": x.get("period") or "—",
+            "原因": x.get("reason", ""),
+            "研报原句": (x.get("evidence") or {}).get("sentence") or "—",
+        } for x in rv]), width='stretch', hide_index=True)
 
 # ---- ② 一致性指标 ----
 with tab2:

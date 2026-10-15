@@ -3,6 +3,12 @@
 import re
 from decimal import Decimal, InvalidOperation
 
+# gen_commentary 输出允许出现的小节名（与 prompts/gen_commentary.txt 的五小节一致）
+COMMENTARY_SECTIONS = ("【核心观点】", "【收入分析】", "【盈利能力】",
+                       "【现金流】", "【风险提示】")
+# 必含小节：【核心观点】是报告开篇结论，必须由模型生成；缺失即拦截并触发修复重试
+REQUIRED_COMMENTARY_SECTIONS = ("【核心观点】",)
+
 def check_enum_whitelist(obj, allowed: dict) -> list[str]:
     """枚举白名单：canonical_item / item_code / cause 只能在候选集合里"""
     errs = []
@@ -57,6 +63,27 @@ def check_no_amounts(text: str, allowed_numbers: set[str]) -> list[str]:
         if _canon_num(num) not in allowed_canon:
             errs.append(f"报告中出现未经程序确认的数字：{num}")
     return errs
+
+def check_commentary_sections(text: str) -> list[str]:
+    """gen_commentary 输出的小节名必须落在允许集合内，且必含【核心观点】。
+
+    1. 越界小节名：模型自造了未定义的小节，直接拦；
+    2. 必含小节：核心观点是报告开篇结论，必须由模型生成，缺失即拦截并触发修复重试；
+       其余小节不强制齐备，避免因少写一节把整条评价判废（缺节由人工复核兜底）。
+
+    本节只做「小节名是否出现」的文本判定，不涉及任何数值运算；
+    核心观点里的数字仍由 check_no_amounts 的白名单单独把关。
+    """
+    errs = []
+    names = re.findall(r"【[^】]{1,20}】", text or "")
+    for name in names:
+        if name not in COMMENTARY_SECTIONS:
+            errs.append(f"报告出现未定义的小节名：{name}")
+    for need in REQUIRED_COMMENTARY_SECTIONS:
+        if need not in names:
+            errs.append(f"缺少必写小节：{need}")
+    return errs
+
 
 def check_evidence(ev: dict, chunks: dict[str, str]) -> tuple[bool, str]:
     """证据校验：chunk_id 必须在本次输入内，quote 必须真实存在于该片段"""
