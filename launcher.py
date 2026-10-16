@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -31,6 +32,10 @@ REQ = ROOT / "requirements.txt"
 ENV_FILE = ROOT / ".env"
 RUNTIME = ROOT / ".runtime"          # 自动下载的内嵌 Python 落在这里
 RUN_ID = "reproduce"
+# 启动标记 + 崩溃堆栈落盘：控制台完全没有输出时，这是唯一线索。
+# 有"启动"行 = Python 跑起来了（问题在输出）；文件为空/不存在 = 根本没轮到 Python
+# （多半被安全软件静默拦截或 onefile 解包失败）。
+LOG_FILE = ROOT / "launcher_run.log"
 
 # 依赖导入名（requirements.txt 里对应的包：openai / pydantic / PyYAML /
 # pdfplumber / reportlab / openpyxl / pandas / streamlit）
@@ -62,6 +67,15 @@ PY: list[str] = []                   # 解析出的解释器命令，如 ["pytho
 
 def line(text: str = "") -> None:
     print(text, flush=True)
+
+
+def _log(text: str, reset: bool = False) -> None:
+    """把启动标记 / 崩溃堆栈写进 launcher_run.log（写不进去也不影响主流程）。"""
+    try:
+        with LOG_FILE.open("w" if reset else "a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    except OSError:
+        pass
 
 
 def step(title: str) -> None:
@@ -501,9 +515,7 @@ def diagnose() -> int:
     line(f"  项目根目录：{ROOT}")
     line(f"  运行方式：{'launcher.exe（冻结）' if FROZEN else 'python launcher.py（源码）'}")
 
-    step("[1] 运行包完整性")
     tree_ok = check_tree()
-    line(f"  小结：{'完整' if tree_ok else '不完整'}")
 
     step("[2] Python 解释器")
     cmd = find_python()
@@ -542,12 +554,15 @@ def diagnose() -> int:
     line("  结论：" + ("环境具备运行条件（离线模式可直接复现）"
                       if tree_ok and cmd else "存在阻断项，见上面 [!!] 行"))
     line("  把以上整屏输出发给开发者即可定位问题。")
+    line(f"  启动日志：{LOG_FILE.name}（若控制台一行都没有输出，请看这个文件的首行）")
     return 0
 
 
 def main() -> int:
     global PY
     _setup_console()
+    _log(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 启动 mode="
+         f"{'exe' if FROZEN else 'src'} root={ROOT} argv={sys.argv[1:]}", reset=True)
     if "--diagnose" in sys.argv or "-d" in sys.argv:
         return diagnose()
 
@@ -584,3 +599,16 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         line("\n  已中断。")
         raise SystemExit(130)
+    except SystemExit:
+        raise                                               # 正常/自定退出码，不是崩溃
+    except BaseException:                                    # noqa: BLE001
+        # 控制台可能被吞掉输出；堆栈必须落盘，否则这类失败完全无法排查
+        import traceback
+        text = traceback.format_exc()
+        _log(text)
+        try:
+            line(f"  [!!] 启动器异常退出，完整堆栈已写入 {LOG_FILE.name}：")
+            line(text)
+        except Exception:                                    # noqa: BLE001
+            pass
+        raise SystemExit(1)

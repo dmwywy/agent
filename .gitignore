@@ -24,6 +24,9 @@ dist/
 *.spec
 .runtime/
 
+# 启动器运行日志（启动标记 + 崩溃堆栈，仅本地排查用）
+launcher_run.log
+
 # editor - allow settings.json only
 .vscode/*
 !.vscode/settings.json
