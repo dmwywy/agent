@@ -8,6 +8,9 @@
 
 被冻结成 exe 时（sys.frozen），本进程内部没有 Python 解释器，因此必须自行定位一个
 可用的解释器；本机完全没有 Python 时可自动下载官方内嵌运行时到 `.runtime/`。
+
+环境诊断（把整屏输出发给他人即可定位问题）：
+    python launcher.py --diagnose     （launcher.exe --diagnose 亦可）
 """
 from __future__ import annotations
 
@@ -35,9 +38,24 @@ NEEDED = ["openai", "pydantic", "yaml", "pdfplumber",
           "reportlab", "openpyxl", "pandas", "streamlit"]
 
 PY_MIN = (3, 10)
+PY_WARN_MAX = (3, 13)                # 3.13+ 部分依赖可能没有预编译轮子，只提醒不阻断
 EMBED_URL = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip"
 GETPIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 DOWNLOAD_PAGE = "https://www.python.org/downloads/windows/"
+
+# 材料文件夹里可识别的后缀（与 src/ingest.py 的 SUPPORTED 保持一致）
+MATERIAL_SUFFIXES = (".pdf", ".docx")
+
+# 启动前必须与 launcher 同目录存在的关键路径：缺任何一项都说明「运行包不完整 / exe 放错位置」，
+# 继续跑只会得到一堆找不到文件或 import 失败，因此提前拦下并给出明确处理办法。
+TREE_REQUIRED = [
+    ("requirements.txt", "依赖清单"),
+    ("app.py", "网页界面入口"),
+    ("fincheck/__main__.py", "命令行入口"),
+    ("src", "核心代码目录"),
+    ("configs/demo.yaml", "默认运行配置"),
+]
+TREE_OPTIONAL = [("data/demo", "自带 demo 数据（回车跑 demo 时才需要）")]
 
 PY: list[str] = []                   # 解析出的解释器命令，如 ["python"] 或 ["C:/.../python.exe"]
 
@@ -95,6 +113,63 @@ def _version(cmd: list[str]) -> str:
         return probe.stdout.strip() or "?"
     except (OSError, subprocess.SubprocessError):
         return "?"
+
+
+def _ver_tuple(cmd: list[str]) -> tuple[int, int, int] | None:
+    """取解释器的版本三元组；失败返回 None。"""
+    try:
+        probe = subprocess.run(
+            cmd + ["-c", "import sys;print('%d.%d.%d' % sys.version_info[:3])"],
+            capture_output=True, text=True, timeout=60)
+        if probe.returncode != 0:
+            return None
+        nums = tuple(int(p) for p in probe.stdout.strip().split(".")[:3])
+        return nums if len(nums) == 3 else None          # type: ignore[return-value]
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _missing(cmd: list[str], mods: list[str]) -> list[str]:
+    """逐个 import 探测，返回无法导入的模块名。"""
+    absent = []
+    for mod in mods:
+        probe = subprocess.run(cmd + ["-c", f"import {mod}"], capture_output=True)
+        if probe.returncode != 0:
+            absent.append(mod)
+    return absent
+
+
+def _free_port(start: int, tries: int = 20) -> int:
+    """从 start 起找一个可绑定的本地端口（8501 被占用时自动后移）。
+
+    注意：Windows 上 SO_REUSEADDR 允许绑定已被占用的地址，会让探测失效，
+    因此这里不设该选项，只依赖 bind 是否抛 OSError 来判断。
+    """
+    import socket
+    for port in range(start, start + tries):
+        with socket.socket() as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    return start
+
+
+def _net_ok(host: str, port: int = 443, timeout: float = 5.0) -> bool:
+    """TCP 可达性探测（只建连接、不下载、不调模型），用于暴露网络/代理问题。"""
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def count_materials(folder: Path) -> int:
+    """统计文件夹（含子目录）里的 PDF / DOCX 数量。"""
+    return sum(1 for p in folder.rglob("*")
+               if p.is_file() and p.suffix.lower() in MATERIAL_SUFFIXES)
 
 
 # ---------------------------------------------------------------- 0. 定位 / 下载解释器
@@ -166,11 +241,59 @@ def download_runtime() -> list[str] | None:
 
 # ---------------------------------------------------------------- 1. 环境自检
 
+def check_tree() -> bool:
+    """运行包完整性：关键文件必须与 launcher 同目录。
+
+    exe 与源码模式都以「文件所在目录」为项目根，把 launcher.exe 单独拷走、
+    或只解压出部分文件，都会让后续步骤全线失败；这里提前拦下并说明处理办法。
+    """
+    step("[1/4] 环境自检 · 运行包完整性")
+    missing = [f"{p}（{why}）" for p, why in TREE_REQUIRED if not (ROOT / p).exists()]
+    if not missing:
+        line(f"  [OK] 关键文件齐备（根目录：{ROOT}）")
+        for p, why in TREE_OPTIONAL:
+            if not (ROOT / p).exists():
+                line(f"  [注意] 缺少 {p}（{why}）；自备材料文件夹时可忽略。")
+        return True
+
+    line(f"  [!!] 运行包不完整，缺少以下关键文件/目录（当前根目录：{ROOT}）")
+    for item in missing:
+        line(f"        - {item}")
+    if FROZEN:
+        line("  [处理] launcher.exe 必须与 fincheck/、src/、app.py、requirements.txt 位于")
+        line("         同一个项目根目录；请整包拷贝，不要把 exe 单独拷出来运行。")
+    else:
+        line("  [处理] 请在项目根目录（含 fincheck/、src/、app.py 的那一层）运行 launcher.py。")
+    return False
+
+
+def check_folder(raw: str) -> str | None:
+    """材料文件夹预检：不存在 / 不是目录 / 没有可识别文件时返回 None。"""
+    path = Path(clean_path(raw))
+    if not path.exists():
+        line(f"  [!!] 文件夹不存在：{path}")
+        return None
+    if not path.is_dir():
+        line(f"  [!!] 这个路径不是文件夹：{path}")
+        return None
+    count = count_materials(path)
+    if count == 0:
+        line(f"  [!!] 文件夹里没有 .pdf / .docx 文件：{path}")
+        line("       支持多层子目录；请确认路径，或直接回车改用仓库自带 demo 数据。")
+        return None
+    line(f"  [OK] 找到 {count} 份 PDF / DOCX 材料")
+    return str(path)
+
+
 def check_python() -> list[str] | None:
     step("[1/4] 环境自检 · Python 解释器")
     cmd = find_python()
     if cmd:
         line(f"  [OK] 已找到 Python {_version(cmd)}（{cmd[0]}）")
+        ver = _ver_tuple(cmd)
+        if ver and ver[:2] >= PY_WARN_MAX:
+            line(f"  [注意] Python {ver[0]}.{ver[1]} 较新，部分依赖可能没有预编译轮子；"
+                 "若下一步安装失败，请改用 3.11（如 3.11.9）。")
         return cmd
 
     line("  [!!] 本机未检测到可用的 Python（需 3.10+）。")
@@ -193,23 +316,33 @@ def check_python() -> list[str] | None:
 def check_deps(cmd: list[str]) -> bool:
     step("[1/4] 环境自检 · 依赖包")
     line(f"  Python  {_version(cmd)}  ({cmd[0]})")
-    missing = []
-    for mod in NEEDED:
-        probe = subprocess.run(cmd + ["-c", f"import {mod}"], capture_output=True)
-        if probe.returncode != 0:
-            missing.append(mod)
-
+    missing = _missing(cmd, NEEDED)
     if not missing:
         line("  [OK] 依赖齐备，无需安装")
         return True
 
     line(f"  缺少依赖：{', '.join(missing)}")
+    if not REQ.exists():
+        line(f"  [!!] 找不到依赖清单 {REQ.name}，无法自动安装。请检查运行包是否完整。")
+        return False
+
     line("  正在自动安装：python -m pip install -r requirements.txt")
     rc = _run(cmd + ["-m", "pip", "install", "-r", str(REQ)])
     if rc != 0:
-        line("  [!!] 自动安装失败。请手动执行：python -m pip install -r requirements.txt")
+        line(f"  [!!] 自动安装失败（退出码 {rc}）。")
+        if not _net_ok("pypi.org"):
+            line("  [诊断] 探测 pypi.org:443 不通 —— 大概率是网络 / 代理 / 白名单问题。")
+        line("         可手工执行：python -m pip install -r requirements.txt 查看具体报错。")
         return False
-    line("  [OK] 依赖安装完成")
+
+    # ★ 安装后必须复验：pip 可能"部分成功"，或包装上了但 import 仍失败（版本/轮子问题）
+    still = _missing(cmd, NEEDED)
+    if still:
+        line(f"  [!!] 安装后仍无法导入：{', '.join(still)}")
+        line("         常见原因：Python 版本过新导致无可用轮子，或网络中断装到一半。")
+        line("         可手工执行：python -m pip install -r requirements.txt 查看具体报错。")
+        return False
+    line("  [OK] 依赖安装完成并复验通过")
     return True
 
 
@@ -285,8 +418,16 @@ def ensure_key() -> bool:
 # ---------------------------------------------------------------- 4. 运行
 
 def run_cli(online: bool) -> int:
-    folder = clean_path(ask(
-        "  请输入材料文件夹路径（直接回车 = 使用仓库自带 demo 数据）："))
+    folder = ""
+    while True:
+        raw = ask("  请输入材料文件夹路径（直接回车 = 使用仓库自带 demo 数据）：")
+        if not raw.strip():
+            break
+        got = check_folder(raw)
+        if got is not None:
+            folder = got
+            break
+        line("  请重新输入，或直接回车改用仓库自带 demo 数据。")
     line()
 
     cmd = PY + ["-m", "fincheck"]
@@ -319,10 +460,14 @@ def run_cli(online: bool) -> int:
 
 
 def run_web() -> int:
-    line("  正在启动网页界面，浏览器会自动打开 http://localhost:8501")
+    port = _free_port(8501)
+    if port != 8501:
+        line(f"  [提示] 端口 8501 已被占用，本次改用 {port}")
+    line(f"  正在启动网页界面，浏览器会自动打开 http://localhost:{port}")
     line("  关闭网页服务：在本窗口按 Ctrl+C")
     line()
-    return _run(PY + ["-m", "streamlit", "run", str(ROOT / "app.py")])
+    return _run(PY + ["-m", "streamlit", "run", str(ROOT / "app.py"),
+                      "--server.port", str(port)])
 
 
 def _setup_console() -> None:
@@ -349,12 +494,71 @@ def _setup_console() -> None:
             pass
 
 
+def diagnose() -> int:
+    """--diagnose：一次性环境体检，用于把问题整屏输出给他人排查。"""
+    line()
+    line("  财报一致性量化核查智能体 · 环境诊断（--diagnose）")
+    line(f"  项目根目录：{ROOT}")
+    line(f"  运行方式：{'launcher.exe（冻结）' if FROZEN else 'python launcher.py（源码）'}")
+
+    step("[1] 运行包完整性")
+    tree_ok = check_tree()
+    line(f"  小结：{'完整' if tree_ok else '不完整'}")
+
+    step("[2] Python 解释器")
+    cmd = find_python()
+    if cmd:
+        line(f"  [OK] {_version(cmd)}（{cmd[0]}）")
+        ver = _ver_tuple(cmd)
+        if ver and ver[:2] >= PY_WARN_MAX:
+            line(f"  [注意] Python {ver[0]}.{ver[1]} 较新，可能存在轮子缺失问题。")
+    else:
+        line("  [!!] 未找到可用 Python（需 3.10+）；首次运行时可自动下载内嵌运行时。")
+
+    step("[3] 依赖包")
+    if cmd:
+        absent = _missing(cmd, NEEDED)
+        line("  [OK] 8 个依赖全部可导入" if not absent
+             else f"  [!!] 无法导入：{', '.join(absent)}")
+    else:
+        line("  [跳过] 无可用解释器")
+
+    step("[4] 网络可达性（TCP 443）")
+    for host in ("pypi.org", "files.pythonhosted.org", "api.deepseek.com"):
+        line(f"  {'[OK]' if _net_ok(host) else '[!!]'} {host}")
+
+    step("[5] 网页端口")
+    port = _free_port(8501)
+    line(f"  [OK] 可用端口 {port}"
+         + ("（8501 空闲）" if port == 8501 else f"（8501 被占用，将改用 {port}）"))
+
+    step("[6] 配置与数据")
+    demo = ROOT / "data" / "demo"
+    line(f"  {'[OK]' if demo.exists() else '[!!]'} 自带 demo 数据：data/demo")
+    line(f"  {'[OK]' if (ROOT / 'configs' / 'demo.yaml').exists() else '[!!]'} "
+         "默认配置：configs/demo.yaml")
+
+    step("诊断结束")
+    line("  结论：" + ("环境具备运行条件（离线模式可直接复现）"
+                      if tree_ok and cmd else "存在阻断项，见上面 [!!] 行"))
+    line("  把以上整屏输出发给开发者即可定位问题。")
+    return 0
+
+
 def main() -> int:
     global PY
     _setup_console()
+    if "--diagnose" in sys.argv or "-d" in sys.argv:
+        return diagnose()
+
     line()
     line("  财报一致性量化核查智能体 · 交互式启动器")
     line("  （离线模式不需要网络与 API Key，可直接用于评审复现）")
+
+    if not check_tree():
+        line()
+        line("  已退出：请按上面的提示修复运行包后重试。")
+        return 1
 
     found = check_python()
     if found is None:

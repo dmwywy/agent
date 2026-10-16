@@ -134,22 +134,34 @@ Windows 下**双击仓库根目录的 `run.bat`**（它只是 `python launcher.p
 
 之后按提示逐步操作即可，**全程无需改动任何文件**：
 
-1. **环境自检**：检查 Python 与依赖，缺依赖自动执行 `pip install -r requirements.txt`；
-   若本机没有 Python：`launcher.exe` 会自动下载内嵌运行时，`run.bat` 则提示并打开官方下载页
-   （自行安装时勾选 “Add Python to PATH”）。
+1. **环境自检**（四小项）：
+   - **运行包完整性**：校验 `fincheck/`、`src/`、`app.py`、`requirements.txt`、`configs/demo.yaml`
+     是否与 `launcher.py` / `launcher.exe` 同目录；缺任何一项会直接说明「exe 不能单独拷出来运行」
+     并停止，避免后续只得到一串找不到文件的报错。
+   - **Python 解释器**：定位并校验版本 ≥ 3.10（可识别 Microsoft Store 存根）；3.13+ 给出提醒。
+   - **依赖包**：逐个 `import` 探测，缺则自动执行 `pip install -r requirements.txt`，
+     **装完再复验一次**；失败会提示是否为网络 / 代理问题并给出手工命令。
+   - 若本机没有 Python：`launcher.exe` 自动下载内嵌运行时，`run.bat` 提示并打开官方下载页
+     （自行安装时勾选 “Add Python to PATH”）。
 2. **选择运行方式**：`1` 命令行（跑完直接出 PDF / Excel / 网页三端报告）/ `2` 网页（自动打开浏览器界面）。
 3. **检查 DeepSeek 配置**：`.env` 中已有 `DEEPSEEK_API_KEY` 时，让你选在线 / 离线；
    没有时让你输入 Key（写入 `.env`，该文件已 gitignore，不会提交），或直接回车跳过走离线。
    **离线模式不需要网络与 API Key**，是评审复现的默认口径。
 4. **输入材料文件夹路径**：可混放年报 / 研究报告的 PDF、DOCX，支持多份，**无需文件名约定**
-   （按文件内容识别）；**直接回车 = 使用仓库自带 demo 数据**。
+   （按文件内容识别）；输入后会**先校验**路径是否存在、是否为文件夹、里面有没有 PDF / DOCX，
+   不合法会让你重输；**直接回车 = 使用仓库自带 demo 数据**。
 5. **运行**：命令行分支复用 `fincheck`（`ingest` / `run` 并自动生成三端报告）；
-   网页分支启动 `streamlit run app.py`。
+   网页分支启动 `streamlit run app.py`，**端口 8501 被占用时自动避让并打印真实地址**。
+
+> **环境诊断**：任一入口加 `--diagnose`（如 `launcher.exe --diagnose` 或 `python launcher.py --diagnose`）
+> 会一次性打印「运行包完整性 / Python / 依赖 / 网络可达性 / 网页端口 / 配置与数据」六项体检结果，
+> 并给出结论；**把整屏输出发给他人即可定位问题**，无需手工排查。
 
 > **关于 exe**：`launcher.exe` 只打包了**启动器外壳**，没有把 Streamlit 应用整体塞进去——
 > 那样会有数百 MB、还需处理静态资源钩子，构建脆弱且对评审没有额外加分。大赛要求提交
 > **完整源代码 + 依赖文件 + 运行说明**，本仓库三者齐备；exe 只是给「不想敲命令」的使用者
 > 多留一个入口，三条入口（`run.bat` / `launcher.py` / `launcher.exe`）行为完全一致。
+> 注意：exe 由 `launcher.py` 打包而来，**改过 `launcher.py` 后需重新执行 `build_exe.bat`**。
 
 ---
 
