@@ -1,5 +1,8 @@
 @echo off
-rem 重新打包 launcher.exe（PyInstaller 单文件外壳）。需要在项目根目录、已安装 Python 3.10+。
+rem ---------------------------------------------------------------
+rem  Rebuild launcher.exe with PyInstaller (needs Python 3.10+ on PATH).
+rem  Keep this file ASCII-only, see run.bat for the reason.
+rem ---------------------------------------------------------------
 setlocal
 cd /d "%~dp0"
 
@@ -8,5 +11,5 @@ python -m PyInstaller --onefile --noconfirm --clean --name launcher ^
   --distpath . --workpath build --specpath build launcher.py
 
 echo.
-echo 打包完成：launcher.exe（中间产物在 build\ 目录，可删除）
+echo Done. launcher.exe is in this folder; the build\ folder can be deleted.
 pause

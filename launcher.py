@@ -43,7 +43,7 @@ PY: list[str] = []                   # 解析出的解释器命令，如 ["pytho
 
 
 def line(text: str = "") -> None:
-    print(text)
+    print(text, flush=True)
 
 
 def step(title: str) -> None:
@@ -72,6 +72,8 @@ def mask(key: str) -> str:
 
 
 def _run(cmd: list[str], **kw) -> int:
+    # 先把自身缓冲刷出去，否则子进程输出会插到提示语前面（管道/重定向时尤其明显）
+    sys.stdout.flush()
     return subprocess.call(cmd, cwd=ROOT, **kw)
 
 
@@ -324,16 +326,14 @@ def run_web() -> int:
 
 
 def _setup_console() -> None:
-    """冻结成 exe 时统一按 UTF-8 输出。
+    """把控制台统一成 UTF-8，避免中文输出乱码或直接抛错。
 
-    PyInstaller 外壳进程与它拉起的 python 子进程可能用不同编码写同一个控制台，
-    导致「启动器自己的中文乱码、子进程的正常」。这里把控制台代码页、自身流编码
-    与子进程编码（PYTHONIOENCODING）统一成 UTF-8，两边就一致了。
-    源码模式（python launcher.py）沿用控制台原有编码，不改动。
+    两种模式都要做：
+      - 冻结成 exe 时，外壳进程与它拉起的 python 子进程必须用同一编码写同一个控制台；
+      - 源码模式（python launcher.py）下，控制台代码页可能是 437/936/950，
+        直接 print 中文会乱码，编码严格时甚至抛 UnicodeEncodeError 中断流程。
+    统一控制台代码页、自身三条流与子进程编码（PYTHONIOENCODING）为 UTF-8。
     """
-    if not FROZEN:
-        return
-    os.environ["PYTHONIOENCODING"] = "utf-8"
     if sys.platform.startswith("win"):
         try:
             import ctypes
@@ -341,7 +341,8 @@ def _setup_console() -> None:
             ctypes.windll.kernel32.SetConsoleCP(65001)
         except Exception:                                    # noqa: BLE001
             pass
-    for stream in (sys.stdout, sys.stderr):
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
