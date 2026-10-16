@@ -19,7 +19,17 @@
 | 网络 | 在线模式需可访问 `api.deepseek.com`；离线模式无需网络 |
 | 磁盘 | 建议预留 500 MB（含依赖与样例数据） |
 
-安装依赖：
+> **先确认本机有没有 Python**——第一、二章都建立在这个前提上，它也是最容易卡住的一步：
+>
+> - **PowerShell**：用 `where.exe python` 或 `Get-Command python -All`（`py --list` 列出全部已装版本）。
+>   ⚠️ PowerShell 里的 `where` 是 cmdlet `Where-Object` 的**别名**，单独敲 `where python` 会**静默无输出**，
+>   这**不代表**没装 Python；只有 `where.exe python` 才等价于 cmd 的行为。
+> - **cmd / 终端**：`where python`
+> - **没装 Python、版本低于 3.10，或者根本不想折腾环境**：**直接跳到「四之二、交互式启动」**，
+>   双击 `run.bat`（PowerShell 里请输入 `.\run.bat`）。启动器会自检解释器，必要时**自动下载官方
+>   内嵌运行时到 `.runtime/`** 并自动安装依赖——**第一、二章可以整章跳过**。
+
+安装依赖（仅「手工搭建环境」这条路线需要；一键启动会自动装）：
 
     python -m pip install -r requirements.txt
 
@@ -30,6 +40,12 @@ Windows 下若使用 PowerShell 激活虚拟环境时报执行策略错误，先
 ---
 
 ## 二、初始化（仅首次）
+
+> **前置条件**：本机已安装 Python 3.11 / 3.12（用 `py --list` 确认）。
+> 下文的 `py -3.11 -m venv .venv` 只有在 **3.11 运行时已装好**时才有意义；
+> 否则会报 `No suitable Python runtime found`——那是「本机没有 3.11」，**不是命令写错了**。
+> 本节是「手工搭建环境」路线；只想把流程跑一遍（复核、演示）的话，
+> **本节与「安装依赖」都可跳过，直接看「四之二、交互式启动」**。
 
 ### 1. 创建虚拟环境
 
@@ -60,7 +76,7 @@ macOS / Linux：
 
 ### 3. 确认解释器
 
-    where python      # macOS / Linux 用 which python
+    where.exe python  # PowerShell 与 cmd 都可用（PowerShell 里 where 是 Where-Object 的别名，见第一章）
     python -V
 
 第一行路径应指向项目内的 `.venv`，版本应为 3.11.x。
