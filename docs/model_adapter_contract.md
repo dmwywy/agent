@@ -234,7 +234,7 @@ OpenAI SDK 会抛对应异常，`e.status_code` 取状态码、`e.body` 取上�
 ### 9.1 强制 JSON
 
 请求带 `response_format={"type":"json_object"}`。官方要求提示词中必须出现
-**"json" 字样并给出输出样例**——仓库的 4 个提示词均满足，并有测试守护
+**"json" 字样并给出输出样例**——仓库的 5 个提示词均满足，并有测试守护
 （`test_tasks.py::test_prompt_files_naming` 断言每个提示词含 `json`）。
 
 ### 9.2 三层校验（`src/tasks.py::call_task`）

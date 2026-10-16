@@ -521,11 +521,13 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     │   ├── model_adapter_contract.md  模型接口确认版
     │   ├── third_party.md    第三方依赖与模型清单
     │   ├── MCP接口设计.md    MCP 模块接口设计（已实现）
-    │   └── 决赛交付与模块映射.md  模块映射与交付说明
-    ├── prompts/              4 个提示词（内容哈希写入 manifest）
+    │   ├── 决赛交付与模块映射.md  模块映射与交付说明
+    │   └── 目录说明.md       全项目文件夹/文件与运行产物的逐项说明
+    ├── prompts/              5 个提示词（内容哈希写入 manifest）
     │   ├── match_item.txt    科目归一化
     │   ├── match_claim.txt   研报引用匹配
     │   ├── explain_anomaly.txt  异常原因解释
+    │   ├── audit_claims.txt     语义审计（发现清单外语义问题）
     │   └── gen_commentary.txt   报告定性文字（研报式评价）
     ├── skills/               9 个 SKILL.md（声明式，不接入运行时）
     │   ├── match_item/SKILL.md     科目归一化（模型侧）
@@ -664,7 +666,7 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
 
 使用范围：上述依赖仅用于文档解析、结构校验、配置读取与模型调用。
 逐项清单（名称、版本、来源、许可证、具体使用范围）见 `docs/third_party.md`。
-第三方模型与商业软件不提交源代码，其名称、版本、调用方式与使用范围见本节、`docs/third_party.md` 与 `docs/model_plan.md`。
+第三方模型与商业软件不提交源代码，其名称、版本、调用方式与使用范围见本节、`docs/third_party.md` 与 `docs/model_adapter_contract.md`。
 
 ---
 

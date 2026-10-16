@@ -536,7 +536,7 @@ def test_cache_key_stable_and_sensitive():
 
 
 def test_cache_key_covers_all_inference_params(monkeypatch):
-    """推理参数必须参与缓存键，否则改了参数却命中旧结果（model_plan §2.5）。"""
+    """推理参数必须参与缓存键，否则改了参数却命中旧结果（见 docs/model_adapter_contract.md §14）。"""
     import src.llm as L
     base = L.cache_key("p", {"a": 1})
     monkeypatch.setattr(L, "THINKING", {"type": "enabled"})
