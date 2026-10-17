@@ -4,13 +4,13 @@
 三种入口等价：
     双击仓库根目录的 `run.bat`（调用本脚本）
     或在项目根目录执行：python launcher.py
-    或双击 `launcher.exe`（PyInstaller 打包的同名外壳；exe 只做引导，核查仍用旁边的源码跑）
+    或双击 `fincheck-launcher.exe`（PyInstaller 打包的外壳；exe 只做引导，核查仍用旁边的源码跑）
 
 被冻结成 exe 时（sys.frozen），本进程内部没有 Python 解释器，因此必须自行定位一个
 可用的解释器；本机完全没有 Python 时可自动下载官方内嵌运行时到 `.runtime/`。
 
 环境诊断（把整屏输出发给他人即可定位问题）：
-    python launcher.py --diagnose     （launcher.exe --diagnose 亦可）
+    python launcher.py --diagnose     （fincheck-launcher.exe --diagnose 亦可）
 """
 from __future__ import annotations
 
@@ -258,7 +258,7 @@ def download_runtime() -> list[str] | None:
 def check_tree() -> bool:
     """运行包完整性：关键文件必须与 launcher 同目录。
 
-    exe 与源码模式都以「文件所在目录」为项目根，把 launcher.exe 单独拷走、
+    exe 与源码模式都以「文件所在目录」为项目根，把 fincheck-launcher.exe 单独拷走、
     或只解压出部分文件，都会让后续步骤全线失败；这里提前拦下并说明处理办法。
     """
     step("[1/4] 环境自检 · 运行包完整性")
@@ -274,7 +274,7 @@ def check_tree() -> bool:
     for item in missing:
         line(f"        - {item}")
     if FROZEN:
-        line("  [处理] launcher.exe 必须与 fincheck/、src/、app.py、requirements.txt 位于")
+        line("  [处理] fincheck-launcher.exe 必须与 fincheck/、src/、app.py、requirements.txt 位于")
         line("         同一个项目根目录；请整包拷贝，不要把 exe 单独拷出来运行。")
     else:
         line("  [处理] 请在项目根目录（含 fincheck/、src/、app.py 的那一层）运行 launcher.py。")
@@ -513,7 +513,7 @@ def diagnose() -> int:
     line()
     line("  财报一致性量化核查智能体 · 环境诊断（--diagnose）")
     line(f"  项目根目录：{ROOT}")
-    line(f"  运行方式：{'launcher.exe（冻结）' if FROZEN else 'python launcher.py（源码）'}")
+    line(f"  运行方式：{Path(sys.executable).name + '（冻结）' if FROZEN else 'python launcher.py（源码）'}")
 
     tree_ok = check_tree()
 

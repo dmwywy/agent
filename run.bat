@@ -24,15 +24,15 @@ if not errorlevel 1 (
 )
 
 rem --- 3) no Python at all: use the bundled exe, it fetches a private runtime ---
-if exist "launcher.exe" (
-  echo [INFO] Python 3 not found on PATH. Starting launcher.exe instead.
+if exist "fincheck-launcher.exe" (
+  echo [INFO] Python 3 not found on PATH. Starting fincheck-launcher.exe instead.
   echo        It will download a private Python runtime automatically.
   echo.
-  launcher.exe
+  fincheck-launcher.exe
   goto :done
 )
 
-echo [ERROR] Python 3 not found on PATH and launcher.exe is missing.
+echo [ERROR] Python 3 not found on PATH and fincheck-launcher.exe is missing.
 echo         Please install Python 3.10 or newer and tick "Add Python to PATH".
 echo         Opening the official download page now.
 start "" "https://www.python.org/downloads/windows/"

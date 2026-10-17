@@ -18,7 +18,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# PyInstaller 中间产物与自动下载的内嵌运行时（launcher.exe 本身要交付，不忽略）
+# PyInstaller 中间产物与自动下载的内嵌运行时（fincheck-launcher.exe 本身要交付，不忽略）
 build/
 dist/
 *.spec

@@ -143,7 +143,7 @@ Windows 下**双击仓库根目录的 `run.bat`**（它只是 `python launcher.p
 
     python launcher.py
 
-也可以直接双击 **`launcher.exe`**（PyInstaller 打包的同名外壳，约 8.5 MB）。它只做
+也可以直接双击 **`fincheck-launcher.exe`**（PyInstaller 打包的外壳，约 8.6 MB）。它只做
 「检测环境 → 引导 → 拉起源码」，真正的核查逻辑仍用旁边的 Python 源码跑；**本机没有 Python 时，
 它会自动下载官方内嵌运行时到 `.runtime/`**（约 11 MB，不改系统环境），所以免装环境也能用。
 重新打包：双击 `build_exe.bat`。
@@ -152,12 +152,12 @@ Windows 下**双击仓库根目录的 `run.bat`**（它只是 `python launcher.p
 
 1. **环境自检**（四小项）：
    - **运行包完整性**：校验 `fincheck/`、`src/`、`app.py`、`requirements.txt`、`configs/demo.yaml`
-     是否与 `launcher.py` / `launcher.exe` 同目录；缺任何一项会直接说明「exe 不能单独拷出来运行」
+     是否与 `launcher.py` / `fincheck-launcher.exe` 同目录；缺任何一项会直接说明「exe 不能单独拷出来运行」
      并停止，避免后续只得到一串找不到文件的报错。
    - **Python 解释器**：定位并校验版本 ≥ 3.10（可识别 Microsoft Store 存根）；3.13+ 给出提醒。
    - **依赖包**：逐个 `import` 探测，缺则自动执行 `pip install -r requirements.txt`，
      **装完再复验一次**；失败会提示是否为网络 / 代理问题并给出手工命令。
-   - 若本机没有 Python：`launcher.exe` 自动下载内嵌运行时，`run.bat` 提示并打开官方下载页
+   - 若本机没有 Python：`fincheck-launcher.exe` 自动下载内嵌运行时，`run.bat` 提示并打开官方下载页
      （自行安装时勾选 “Add Python to PATH”）。
 2. **选择运行方式**：`1` 命令行（跑完直接出 PDF / Excel / 网页三端报告）/ `2` 网页（自动打开浏览器界面）。
 3. **检查 DeepSeek 配置**：`.env` 中已有 `DEEPSEEK_API_KEY` 时，让你选在线 / 离线；
@@ -169,22 +169,23 @@ Windows 下**双击仓库根目录的 `run.bat`**（它只是 `python launcher.p
 5. **运行**：命令行分支复用 `fincheck`（`ingest` / `run` 并自动生成三端报告）；
    网页分支启动 `streamlit run app.py`，**端口 8501 被占用时自动避让并打印真实地址**。
 
-> **环境诊断**：任一入口加 `--diagnose`（如 `launcher.exe --diagnose` 或 `python launcher.py --diagnose`）
+> **环境诊断**：任一入口加 `--diagnose`（如 `fincheck-launcher.exe --diagnose` 或 `python launcher.py --diagnose`）
 > 会一次性打印「运行包完整性 / Python / 依赖 / 网络可达性 / 网页端口 / 配置与数据」六项体检结果，
 > 并给出结论；**把整屏输出发给他人即可定位问题**，无需手工排查。
 
 > **在 PowerShell 里运行**：PowerShell **不会**从当前目录直接加载脚本，必须加 `.\` 前缀——
-> 用 `.\run.bat`、`.\launcher.exe --diagnose`；在 cmd 里或直接双击则不需要前缀。
+> 用 `.\run.bat`、`.\fincheck-launcher.exe --diagnose`；在 cmd 里或直接双击则不需要前缀。
 
 > **若控制台一行输出都没有**：启动器会把「启动标记 + 崩溃堆栈」写入仓库根目录的
 > `launcher_run.log`。**该文件里有启动行** → Python 已跑起来（问题只在输出）；
 > **文件不存在或为空** → 根本没轮到 Python，常见原因是**安全软件拦截了 PyInstaller 单文件产物**，
 > 请把该目录加入信任后重试，或改用源码模式 `python launcher.py --diagnose` 对照。
 
-> **关于 exe**：`launcher.exe` 只打包了**启动器外壳**，没有把 Streamlit 应用整体塞进去——
+> **关于 exe**：`fincheck-launcher.exe` 只打包了**启动器外壳**，没有把 Streamlit 应用整体塞进去——
 > 那样会有数百 MB、还需处理静态资源钩子，构建脆弱且对评审没有额外加分。大赛要求提交
 > **完整源代码 + 依赖文件 + 运行说明**，本仓库三者齐备；exe 只是给「不想敲命令」的使用者
-> 多留一个入口，三条入口（`run.bat` / `launcher.py` / `launcher.exe`）行为完全一致。
+> 多留一个入口，三条入口（`run.bat` / `launcher.py` / `fincheck-launcher.exe`）行为完全一致。
+> 文件名带 `fincheck-` 前缀，避免与 PATH 中的同名程序（如 IDE 自带的 `launcher.exe`）冲突。
 > 注意：exe 由 `launcher.py` 打包而来，**改过 `launcher.py` 后需重新执行 `build_exe.bat`**。
 
 ---
@@ -542,8 +543,8 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     ├── test_tasks.py         任务 / 提示词 / 校验 / MCP 协议测试
     ├── run.bat              双击入口（薄包装，仅调用 launcher.py）
     ├── launcher.py           交互式启动器：环境自检 → 选命令行/网页 → 填 Key → 选材料 → 运行
-    ├── launcher.exe          launcher.py 的 exe 外壳（免装 Python，缺环境自动下载内嵌运行时）
-    ├── build_exe.bat        重新打包 launcher.exe（PyInstaller）
+    ├── fincheck-launcher.exe  launcher.py 的 exe 外壳（免装 Python，缺环境自动下载内嵌运行时）
+    ├── build_exe.bat        重新打包 fincheck-launcher.exe（PyInstaller）
     ├── fincheck/
     │   └── __main__.py       CLI 入口：run / ingest / report 与运行摘要
     ├── mcp_server/           MCP 服务（stdio JSON-RPC 2.0，标准库实现，零新增依赖）
@@ -554,7 +555,7 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     │   ├── demo.yaml         运行配置
     │   └── model.yaml        模型与推理参数声明（`src/llm.py` 启动时加载）
     ├── docs/                 交付用文档（接口契约、字段字典等设计稿在交付包外）
-    │   ├── model_adapter_contract.md  模型接口确认版
+    │   ├── model_adapter_contract.md  模型接口契约
     │   ├── third_party.md    第三方依赖与模型清单
     │   ├── MCP接口设计.md    MCP 模块接口设计（已实现）
     │   ├── 决赛交付与模块映射.md  模块映射与交付说明
@@ -579,11 +580,11 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     │   ├── fields.yaml       字段字典
     │   ├── rules.yaml        规则配置（27 条）
     │   └── tolerance.yaml    容差配置
-    ├── src/                  19 个模块
+    ├── src/                  22 个模块
     │   ├── llm.py            模型调用闸门（缓存、重试、JSON 强制输出）
     │   ├── errors.py         错误分类与提示
-    │   ├── inputs.py         4 类模型输入构造
-    │   ├── schemas.py        4 类返回结构契约
+    │   ├── inputs.py         5 类模型输入构造
+    │   ├── schemas.py        5 类返回结构契约
     │   ├── validators.py     三层校验
     │   ├── tasks.py          任务级接口：加载提示词→调用→校验→修复重试
     │   ├── netguard.py       联网白名单与离线自检
@@ -598,6 +599,9 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     │   ├── explain.py        异常原因解释
     │   ├── report.py         报告生成（PDF / Excel / 网页）
     │   ├── logger.py         事件记录
+    │   ├── semantic_audit.py 大模型语义审计（结论仅落「待复核」）
+    │   ├── refresh.py        产物新鲜度：按代码指纹重算确定性产物
+    │   ├── codefingerprint.py 代码指纹（识别旧版产物并触发重算）
     │   └── manifest.py       运行清单
     ├── tools/                9 个脚本
     │   ├── extract_fields.py / extract_claims.py        年报 / 研报抽取

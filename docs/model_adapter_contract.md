@@ -1,15 +1,4 @@
-# 模型接口契约（确认版）
-
-> **版本**：v1.1 ｜ **更新日期**：2026-10-07 ｜ **维护人**：信息工程（成员五）
-> **依据**：DeepSeek 官方 API 文档 + 本仓库实测（实测记录见 §10、§11）
-> **状态**：可据此开展离线 mock 联调；联网 smoke test 待 §12 的待决项澄清后执行
-
-本文回答联调问题清单中"必须由信工确认"的接口类问题。附件草稿
-（`model_adapter_contract.json` / `data/mock/offline_mock_input.json` /
-`data/mock/offline_mock_output.json`）
-与本仓库实际实现存在差异，差异清单见 §13。
-
----
+# 模型接口契约
 
 ## 1. 模型标识 ★ 最重要的一条
 
@@ -87,12 +76,17 @@
 | `temperature` | `0` | 固定；参与缓存键 |
 | `top_p` | `1` | 固定；参与缓存键 |
 | `max_tokens` | `8000` | 见 §9；参与缓存键 |
-| `stream` | `false` | 初赛不要求流式 |
+| `stream` | `false` | 本项目不使用流式 |
 | `response_format` | `{"type":"json_object"}` | 强制 JSON，见 §9 |
 | `user_id` | 操作者代号 | 按官方要求须匹配 `[a-zA-Z0-9\-_]+`、长度 ≤512；**不写真实姓名** |
 | `thinking` | `{"type":"disabled"}` | **非 OpenAI 标准字段，须经 `extra_body` 传**；见 §9.3 |
 
 **唯一出站入口**：`src/llm.py` 的 `call()`。其余模块不得直接调用模型接口。
+
+两条输出约定（`match_item` / `match_claim`）：
+
+- 期间编码：时期写 `2024`，时点写 `2024-12-31`，**不使用 `FY2024`**。
+- 输出**不含 `evidence` 字段**：页码/定位/原文由程序从解析结果确定性回填，模型不产出位置信息。
 
 ---
 
@@ -208,9 +202,6 @@ OpenAI SDK 会抛对应异常，`e.status_code` 取状态码、`e.body` 取上�
 | 退避策略 | 指数退避 `2^i` 秒 + `0~0.4s` 随机抖动 | `time.sleep(2 ** i + random.uniform(0, 0.4))` |
 | 并发 | 串行（单线程顺序调用） | `configs/model.yaml` 的 `concurrency: 2` 为**规划值，尚未实现** |
 
-**说明**：`concurrency: 2` 目前只是配置声明，代码是串行调用。若后续启用并发，
-需同步处理 429 退避与日志时序。
-
 ---
 
 ## 8. 并发与限流（官方）
@@ -259,8 +250,8 @@ OpenAI SDK 会抛对应异常，`e.status_code` 取状态码、`e.body` 取上�
 
 **相差 33 倍，且默认档位直接导致契约失败**（`content=''` → `json.loads('')` 抛错）。
 
-本项目的模型任务全是"**带候选清单的受限分类/映射**"（选科目、选期间、选原因），
-不需要长链推理，因此契约固定为：
+本项目的模型任务以"**带候选清单的受限分类/映射**"为主（选科目、选期间、选原因），
+不需要长链推理，因此所有任务统一固定为：
 
 ```json
 "thinking": {"type": "disabled"}
@@ -268,9 +259,6 @@ OpenAI SDK 会抛对应异常，`e.status_code` 取状态码、`e.body` 取上�
 
 该参数**参与缓存键**（它改变输出）。`thinking` 不是 OpenAI 标准字段，须通过
 SDK 的 `extra_body` 传递，不能作为顶层参数。
-
-> 若联调中发现某任务确实需要推理（例如 `explain_anomaly` 的归因质量不达标），
-> 应单独为该任务开启并**同步调大 `max_tokens`**，不要全局打开。
 
 ---
 
@@ -306,7 +294,7 @@ Authorization: Bearer ${DEEPSEEK_API_KEY}
 }
 ```
 
-（`fields` 中**只给科目与期间，不给金额**——防止模型越界做数值判断，见接口契约 §5.1。）
+（`fields` 中**只给科目与期间，不给金额**——防止模型越界做数值判断。）
 
 ### 10.2 响应
 
@@ -355,7 +343,7 @@ python tools/make_mock.py --task match_claim --run-id offline_demo --response my
 python -m fincheck run --config configs/demo.yaml --run-id offline_demo --offline
 ```
 
-**实测结果**（本仓库 2026-10-03）：
+**实测结果**：
 
 ```
 调用状态: {'CACHE_HIT': 3}          ← 3 次全部命中 mock，零联网
@@ -373,72 +361,16 @@ item status:  CACHE_HIT | mappings: 22
 - 改 `src/inputs.py` 的 payload 结构；
 - 改批大小（`CLAIM_BATCH`）或输入文件。
 
-改动后**必须重新生成 mock**。这也是"结果可复现"的技术基础：同输入 → 同键 → 同结果。
+改动后**必须重新生成 mock**。同输入 → 同键 → 同结果，是"结果可复现"的技术基础。
 
 ---
 
-## 12. 仍需澄清的接口侧事项
-
-| 序 | 事项 | 现状 |
-|---|---|---|
-| 1 | ~~`gen_report_text` 的输入构造~~ | **已作废**：该任务从未被 pipeline 调用（死代码），已于 2026-10-14 连同 `prompts/gen_report_text.txt`、`ReportTextOut`（改由 `gen_commentary` 复用）、`build_gen_report_text()` 一并移除。报告定性文字现由 `gen_commentary` 承担 |
-| 2 | 服务商 SLA | 官方未提供可用性承诺口径，仅提供 [状态页](https://status.deepseek.com/) |
-| 3 | 并发实现 | `concurrency: 2` 是配置声明，代码仍为串行 |
-| 4 | 预算上限 | `max_calls_per_run: 60` 是规划值，尚未在代码中强制执行 |
-
-> 附件 `integration_open_questions.md` 中另有数项属**业务口径**，不在本文范围，需由
-> 金融侧与数据侧确认，例如：`TOTAL_REVENUE` 与 `REVENUE` 的取数区别、`CASH_END` 与
-> `CASH_EQ_END` 的来源、附注/MD&A 字段是否纳入本次范围、`CF01` 是两项临时检查还是
-> 完整公式、FY/YTD 与 annual/2026-H1 的转换表、容差 profile 生效优先级及单位 floor
-> 取整规则。（CF01 一项建议先看 `rules/rules.yaml` 第 40–47 行的现有注释——
-> 当前实现是**两项临时检查**，注释里已写明"字段补齐后改为三项和"。）
-
----
-
-## 13. 与附件草稿的差异（需修正）
-
-| 附件字段 | 草稿值 | 确认值 | 原因 |
-|---|---|---|---|
-| `request.endpoint` | `MISSING` | `POST https://api.deepseek.com/chat/completions` | 官方文档已确认 |
-| `request.max_tokens` | `1500` | **`8000`** | 推理模型默认开启思考，1500 必然正文为空 |
-| `request.auth` | `"Bearer from environment/.env only"` | 变量名 **`DEEPSEEK_API_KEY`** | 官方样例明确 |
-| 请求参数 | 无 `thinking` | **必填 `thinking:{"type":"disabled"}`** | 见 §9.3，否则契约失败 |
-| `response_common.evidence` | `required` | **`match_item` / `match_claim` 不返回 evidence**，由程序回填 | 接口契约 v1.1/v1.2 |
-| `data/mock/offline_mock_input.json` | 含 `evidence_context` | 该字段不属于这两个任务 | 同上 |
-| `data/mock/offline_mock_output.json` | 返回 `evidence` | 不应返回 | 同上 |
-| `data/mock/offline_mock_input.json` | `period: "FY2024"` | 本项目为 `"2024"`（FY）/ `"2024-12-31"`（时点） | 接口契约 §2.1 |
-| 响应 `confidence` | `required` | 各任务结构见 `src/schemas.py` | 以 schema 为准 |
-
-**关于 `field_mapping_report.md`**（业务内容，按指示未做修改，仅作事实核对）：
-其中 **10 处**标注"信工规格中缺失"的字段——`TOTAL_REVENUE`、`CASH_EQ_END`、
-`CASH_ON_HAND`、`CASH_IN_BANK`、`CASH_OTHER`、`AR_GROSS`、`AR_BADDEBT`、
-`REVENUE_MOUTAI`、`REVENUE_SERIES`、`TOTAL_SHARES`——**经逐项核对，
-全部已在 `rules/fields.yaml` 中定义**（已用脚本逐项验证）。
-
-其中 `TOTAL_REVENUE` 还**已有结构化数据**（2024 年报 p63 提取成功，
-值 `174,144,069,958.25`，与规则表验算值一致）。
-
-该列结论与仓库不一致，建议由数据侧复核后更新——此为**事实性差异**，不是口径分歧。
-
----
-
-## 14. 附：提示词与参数指纹（缓存键组成）
+## 12. 附：提示词与参数指纹（缓存键组成）
 
 | 项 | 当前值 |
 |---|---|
-| 提示词文件 | `prompts/{match_item,match_claim,explain_anomaly,gen_commentary}.txt`（4 个；2026-10-14 移除未接入的 `unit_period` / `gen_report_text`） |
+| 提示词文件 | `prompts/{match_item,match_claim,explain_anomaly,gen_commentary,audit_claims}.txt`（5 个） |
 | 提示词内容哈希 | 每次运行写入 `runs/<run_id>/manifest.json` 的 `prompts[].sha256` |
 | 模型标识 | `deepseek-flash` |
 | 推理参数 | `temperature=0, top_p=1, max_tokens=8000, stream=false, thinking={"type":"disabled"}` |
 | 缓存键 | `sha256(提示词内容 + 模型标识 + 推理参数 + 输入数据)`，不含凭据、时间戳、机器名 |
-
----
-
-## 15. 2026-10-07 契约修订
-
-- 请求模型标识、Endpoint、认证、超时、重试及服务错误结构沿用本文件 §1–§8，并与 `src/llm.py` 一致；模型产品名为 DeepSeek-V4.1-Flash，请求 `model` 值仍为 `deepseek-flash`。
-- `match_claim` 的期间编码遵循项目接口：时期用 `2024`，时点用 `2024-12-31`，不使用 `FY2024`。
-- `match_item` 与 `match_claim` 不返回 `evidence`；程序从解析器结果确定性回填。`match_claim` 的最小模型输出应为 `{"ok":true,"matches":[{"claim_id":"demo-001","item_code":"REVENUE","period":"2024","confidence":0.95,"reason":"句子提到营业收入"}]}`。
-- ~~`gen_report_text` 输入构造已实现并收紧为定性内容~~：该任务已于 2026-10-14 移除（未被 pipeline 调用），契约内不再有该任务；报告定性文字统一由 `gen_commentary` 产出并做数字白名单校验。`data/mock/` 下的 `offline_mock_input.json` 与 `offline_mock_output.json` 仍以 `match_item` / `match_claim` 为例。
-- 服务端错误 envelope 为 `error.message/type/param/code`；客户端按 HTTP 状态码分类，不依赖 `error.code`。
-- 财务字段映射、期间转换表、容差优先级/floor 取整及 CF01 业务公式均不属于模型接口契约；保持项目组业务资料原样，待对应部门决定。

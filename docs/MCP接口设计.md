@@ -1,9 +1,8 @@
 # MCP 接口设计与实现
 
-> **状态：已实现。** 服务代码位于 [`mcp_server/`](../mcp_server/)（`server.py` + `__main__.py`），
-> 启动方式 `python -m mcp_server`（stdio），离线自检 `python -m mcp_server --selftest`；
+> 服务代码位于 [`mcp_server/`](../mcp_server/)（`server.py` + `__main__.py`），
+> 启动 `python -m mcp_server`（stdio），离线自检 `python -m mcp_server --selftest`；
 > 客户端接入配置样例见仓库根 [`.mcp.json`](../.mcp.json)。
-> 输入输出沿用既有接口契约（`interfaces.md`，该设计稿随交付包外置）的 JSON 契约，**不引入任何新契约**。
 >
 > 实现选择：用**标准库**实现 stdio JSON-RPC 2.0，**零新增第三方依赖**（评审环境无需安装 `mcp` SDK），
 > 目录名用 `mcp_server/` 而非 `mcp/`，避免同名本地包遮蔽已安装的官方 SDK。
@@ -24,9 +23,6 @@
 | `fincheck_report` | `python -m fincheck report --run-id <id>` | `run_id`, `formats` | `runs/<id>/report.{pdf,xlsx,html}` |
 | `calculate_ratios` | `src/financial_analysis.py::analyze` | `records` | 盈利能力/费用率/趋势/结构四组指标 JSON（纯计算，不落盘） |
 | `check_consistency` | `src/rules_engine.py::run_rules` | `records`, `run_id` | 规则结果 + CSI 评分 JSON |
-
-> `calculate_ratios` / `check_consistency` 是本项目可暴露的两个**纯确定性工具**，
-> 与 Skill `financial-ratio-calculator` / `consistency-checker` 一一对应。
 
 ## 3. 资源（resources）
 
@@ -57,6 +53,5 @@ MCP 工具声明的是**流程侧入口**，Skill 声明的是**能力边界**�
   `fincheck_report`→`src.report.build_all`、`calculate_ratios`→`src.financial_analysis.analyze`、
   `check_consistency`→`src.rules_engine.run_rules`；**不修改任何业务流程代码**。
 - **协议优先**：stdout 只写 JSON-RPC 消息，工具执行期间的一切库输出重定向到 stderr，避免污染协议流。
-- **可复现**：工具产物与 CLI 逐字节一致，均落在 `runs/<run_id>/`。
 - **自检**：`python -m mcp_server --selftest` 对 `initialize` / `tools/list` / 一次
   `calculate_ratios` 调用 / `resources/read` 四个往返做断言，不联网、不调模型。
