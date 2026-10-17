@@ -438,7 +438,7 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
 `calculate_ratios` / `check_consistency`）与 **3 个资源**（`fincheck://runs`、
 `fincheck://runs/{run_id}/manifest.json`、`fincheck://runs/{run_id}/rules/csi.json`）。
 实现见 `mcp_server/server.py`（标准库 stdio JSON-RPC 2.0，**不新增任何依赖**），
-接口设计见 `docs/MCP接口设计.md`。MCP 层是既有函数/入口的**薄封装**，产物与 CLI 逐字节一致。
+接口设计见交付文档 `docs/MCP接口设计.md`（随交付包提供，不在本源码仓内）。MCP 层是既有函数/入口的**薄封装**，产物与 CLI 逐字节一致。
 
 ### 12. 汇总测试
 
@@ -554,12 +554,6 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     ├── configs/
     │   ├── demo.yaml         运行配置
     │   └── model.yaml        模型与推理参数声明（`src/llm.py` 启动时加载）
-    ├── docs/                 交付用文档（接口契约、字段字典等设计稿在交付包外）
-    │   ├── model_adapter_contract.md  模型接口契约
-    │   ├── third_party.md    第三方依赖与模型清单
-    │   ├── MCP接口设计.md    MCP 模块接口设计（已实现）
-    │   ├── 决赛交付与模块映射.md  模块映射与交付说明
-    │   └── 目录说明.md       全项目文件夹/文件与运行产物的逐项说明
     ├── prompts/              5 个提示词（内容哈希写入 manifest）
     │   ├── match_item.txt    科目归一化
     │   ├── match_claim.txt   研报引用匹配
@@ -614,12 +608,11 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
     │   ├── gold_standard/    人工标准答案
     │   ├── mock/             离线 mock 联调输入/输出 fixture
     │   └── structured/       解析输出的结构化数据
-    ├── 交付材料/             评审交付物
-    │   ├── 交付与运行说明.md  环境、安装、三种入口、一键复现、模块映射
-    │   ├── 项目工作总结.md    目标、完成工作、关键结果、遗留项
-    │   └── 样例核查报告/      一次完整运行的 PDF / Excel / HTML 报告
     └── runs/
         └── demo_baseline/    基准运行结果（提交，用于离线复现）
+
+> 交付用文档（`docs/`）与评审交付物（`交付材料/`）与**本代码目录并列存放**，不随源码仓库提交，
+> 打包时一并交付即可。
 
 ---
 
@@ -705,8 +698,8 @@ CSI=100.0、等级 A，且带 `provisional: true` / `profile: "default-provision
 | DeepSeek API | 见 openai 平台文档 | 深度求索开放平台 | 商业服务 | 语义匹配与文字生成（请求模型标识 `deepseek-flash`，产品名 DeepSeek-V4.1-Flash） |
 
 使用范围：上述依赖仅用于文档解析、结构校验、配置读取与模型调用。
-逐项清单（名称、版本、来源、许可证、具体使用范围）见 `docs/third_party.md`。
-第三方模型与商业软件不提交源代码，其名称、版本、调用方式与使用范围见本节、`docs/third_party.md` 与 `docs/model_adapter_contract.md`。
+逐项清单（名称、版本、来源、许可证、具体使用范围）见交付文档 `docs/third_party.md`。
+第三方模型与商业软件不提交源代码，其名称、版本、调用方式与使用范围见本节、`docs/third_party.md` 与 `docs/model_adapter_contract.md`（均随交付包提供，不在本源码仓内）。
 
 ---
 

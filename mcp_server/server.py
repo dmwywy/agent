@@ -1,7 +1,7 @@
 # mcp_server/server.py
 """MCP（Model Context Protocol）服务：把本项目的核查能力以 stdio 工具形式暴露。
 
-对齐 `docs/MCP接口设计.md`，实现原则：
+对齐交付文档 `MCP接口设计.md`，实现原则：
   - **零侵入**：工具只是 `src/` 既有函数的薄封装，不改动任何业务流程代码；
   - **可复现**：工具产物与 CLI 逐字节一致（都落在 `runs/<run_id>/`）；
   - **零新增依赖**：仅用标准库实现 stdio JSON-RPC 2.0，评审环境无需安装 mcp SDK；

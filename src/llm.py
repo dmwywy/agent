@@ -33,7 +33,7 @@ _CFG = _load_model_config()
 BASE_URL = (_CFG.get("base_url") or "https://api.deepseek.com").strip()
 # 优先级：环境变量 MODEL_ID > configs/model.yaml 的 model_id > 代码默认值
 MODEL_ID = (os.getenv("MODEL_ID") or _CFG.get("model_id") or "deepseek-flash").strip()
-# ★ 推理参数必须全部写在这里：它们参与缓存键（见 docs/model_adapter_contract.md §14）。
+# ★ 推理参数必须全部写在这里：它们参与缓存键（见交付文档 model_adapter_contract.md §12）。
 #   若把 max_tokens 单独传给接口而不放进 PARAMS，改了这个值缓存却不会失效，
 #   会命中上一次的旧结果——"结果可复现"就失真了。
 #   deepseek-flash 是**推理模型**：reasoning_content 与正文共享 max_tokens 预算。

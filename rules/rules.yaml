@@ -14,7 +14,7 @@ version: "1.1"
 # ===== 集中口径开关（provisional，待业务负责人正式裁定）=====
 # 本段是【CSI 维度命名 + 权重 + 有效规则集】的唯一来源；改这里再重跑即可切换口径，
 # 无需改动其它代码。容差档位的唯一来源仍是 rules/tolerance.yaml（本段不复制其数值）。
-# 四项争议的对比、推荐默认值、运行影响与裁定责任人见 docs/决策口径对比_provisional.md。
+# 四项争议的对比、推荐默认值、运行影响与裁定责任人见过程材料中的 决策口径对比_provisional.md（不在本源码仓内）。
 scoring:
   profile: default-provisional   # 生效口径名，随 csi.json 一起落盘（注明来源）
   provisional: true              # 尚未获业务裁定，统一标注 provisional
